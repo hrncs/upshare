@@ -46,12 +46,15 @@ jobs:
         run: pnpm biome format
 
       - name: Run linter
+        if: matrix.os == 'ubuntu-latest'
         run: pnpm lint
 
       - name: Check types
+        if: matrix.os == 'ubuntu-latest'
         run: pnpm check-types
 
       - name: Security vulnerability audit
+        if: matrix.os == 'ubuntu-latest'
         run: pnpm audit --audit-level=high
 
       - name: Run test suite

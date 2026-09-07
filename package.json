@@ -1,0 +1,54 @@
+{
+  "name": "upshare",
+  "version": "0.0.18",
+  "description": "Official CLI for UpShare — upload, download, and manage your files securely via API key.",
+  "keywords": [
+    "upshare",
+    "cli",
+    "file-sharing",
+    "upload",
+    "download",
+    "api"
+  ],
+  "homepage": "https://www.npmjs.com/package/upshare?activeTab=readme",
+  "license": "MIT",
+  "author": "Himanshu Ranjan",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "upshare": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "check": "ultracite check",
+    "check-types": "tsc --noEmit",
+    "fix": "ultracite fix",
+    "format": "biome format --write",
+    "lint": "biome check",
+    "prepublishOnly": "pnpm check && pnpm check-types && pnpm test && pnpm build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@napi-rs/keyring": "2.0.0",
+    "commander": "^13.1.0",
+    "ora": "^8.2.0",
+    "picocolors": "^1.1.1",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
+    "@types/node": "^24.0.0",
+    "tsdown": "^0.23.0",
+    "typescript": "^5.8.0",
+    "ultracite": "7.10.8",
+    "vitest": "4.1.11"
+  },
+  "engines": {
+    "node": ">=20.11"
+  }
+}

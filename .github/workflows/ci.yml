@@ -1,0 +1,59 @@
+name: Validate & Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify native credential-store binding
+        run: node --input-type=module --eval "const keyring = await import('@napi-rs/keyring'); if (typeof keyring.Entry !== 'function') process.exit(1)"
+
+      - name: Check code formatting
+        run: pnpm biome format
+
+      - name: Run linter
+        run: pnpm lint
+
+      - name: Check types
+        run: pnpm check-types
+
+      - name: Security vulnerability audit
+        run: pnpm audit --audit-level=high
+
+      - name: Run test suite
+        run: pnpm test
+
+      - name: Build production bundle
+        run: pnpm build

@@ -73,7 +73,9 @@ export function saveUploadState(state: UploadState): void {
   } catch (error) {
     try {
       fs.unlinkSync(temporaryFile);
-    } catch {}
+    } catch {
+      // Ignore cleanup error if temporary file was not created
+    }
     throw error;
   }
 }

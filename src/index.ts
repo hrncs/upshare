@@ -533,13 +533,12 @@ async function run() {
   try {
     await program.parseAsync(process.argv);
   } catch (err) {
-    if (
+    const isCommanderExit =
       err instanceof CommanderError &&
       (err.code === "commander.helpDisplayed" ||
         err.code === "commander.help" ||
-        err.code === "commander.version")
-    ) {
-    } else {
+        err.code === "commander.version");
+    if (!isCommanderExit) {
       throw err;
     }
   }

@@ -74,7 +74,9 @@ function buildDeviceKeyName(): string | undefined {
     if (host) {
       return `CLI ${host}`.slice(0, 64);
     }
-  } catch {}
+  } catch {
+    // Ignore error reading hostname
+  }
   return undefined;
 }
 

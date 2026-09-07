@@ -22,6 +22,10 @@ import { SUPPORT_EMAIL, statusCommand } from "./status";
 import { upgradeCommand } from "./upgrade";
 import { uploadFileRange } from "./upload";
 
+const FILE_EXISTS_REGEX =
+  /A file with the same name already exists at the destination path; cannot overwrite/;
+const PERMISSION_DENIED_REGEX = /permission denied/;
+
 const spinner = vi.hoisted(() => ({
   fail: vi.fn(),
   stop: vi.fn(),
@@ -715,7 +719,7 @@ describe("finalizeDownloadedFile", () => {
     fs.writeFileSync(destPath, "existing");
 
     expect(() => finalizeDownloadedFile(partPath, destPath)).toThrow(
-      /A file with the same name already exists at the destination path; cannot overwrite/
+      FILE_EXISTS_REGEX
     );
     expect(fs.readFileSync(destPath, "utf8")).toBe("existing");
     expect(fs.existsSync(partPath)).toBe(true);
@@ -803,7 +807,7 @@ describe("finalizeDownloadedFile", () => {
     });
 
     expect(() => finalizeDownloadedFile(partPath, destPath)).toThrow(
-      /permission denied/
+      PERMISSION_DENIED_REGEX
     );
   });
 });
@@ -820,8 +824,8 @@ describe("uploadFileRange", () => {
 
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response(null, {
-        status: 200,
         headers: { etag: '"test-etag"' },
+        status: 200,
       })
     );
 

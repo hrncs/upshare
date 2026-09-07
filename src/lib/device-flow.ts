@@ -34,7 +34,9 @@ export function openBrowser(url: string): boolean {
     } else {
       command = `xdg-open "${url}"`;
     }
-    exec(command, () => {});
+    exec(command, () => {
+      // Fire-and-forget browser launcher
+    });
     return true;
   } catch {
     return false;
@@ -111,7 +113,9 @@ export async function startLoopbackServer(
     );
     try {
       server.close();
-    } catch {}
+    } catch {
+      // Ignore cleanup error
+    }
   }, timeoutMs);
   if (typeof timeout.unref === "function") {
     timeout.unref();
@@ -135,7 +139,9 @@ export async function startLoopbackServer(
     clearTimeout(timeout);
     try {
       server.close();
-    } catch {}
+    } catch {
+      // Ignore cleanup error
+    }
     throw error instanceof Error
       ? error
       : new Error("Could not start local callback server.");
@@ -146,7 +152,9 @@ export async function startLoopbackServer(
       clearTimeout(timeout);
       try {
         server.close();
-      } catch {}
+      } catch {
+        // Ignore cleanup error
+      }
     },
     port,
     waitForCallback: () => callbackPromise,

@@ -51,7 +51,9 @@ export async function whoamiCommand(options?: {
             : prefix;
         fields.push(["API key", pc.gray(label)]);
       }
-    } catch {}
+    } catch {
+      // Ignore failure to resolve stored API key label
+    }
     if (data.quota.reservedBytes > 0) {
       fields.push([
         "Pending",

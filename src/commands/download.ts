@@ -61,7 +61,7 @@ export function finalizeDownloadedFile(
   try {
     fs.renameSync(partPath, destinationPath);
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
+    const { code } = error as NodeJS.ErrnoException;
     if (code === "EXDEV" || code === "ENOTSUP" || code === "EPERM") {
       fs.copyFileSync(partPath, destinationPath);
       fs.unlinkSync(partPath);

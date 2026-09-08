@@ -10,7 +10,14 @@
     "download",
     "api"
   ],
-  "homepage": "https://www.npmjs.com/package/upshare?activeTab=readme",
+  "homepage": "https://github.com/hrncs/upshare#readme",
+  "bugs": {
+    "url": "https://github.com/hrncs/upshare/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hrncs/upshare.git"
+  },
   "license": "MIT",
   "author": "Himanshu Ranjan",
   "type": "module",
@@ -21,7 +28,8 @@
   "files": [
     "dist",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "tsdown",

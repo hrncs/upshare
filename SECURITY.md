@@ -14,7 +14,7 @@ Only the latest release of UpShare CLI receives active security patches.
 Do not report security vulnerabilities or credential leaks through public GitHub issues.
 
 Please report them privately via:
-- **Email**: Send vulnerability details to [support@upshare.app](mailto:support@upshare.app) with the subject `[SECURITY] UpShare CLI Vulnerability`.
+- **Email**: Send vulnerability details to [dev@upshare.app](mailto:dev@upshare.app) with the subject `[SECURITY] UpShare CLI Vulnerability`.
 - **GitHub Advisories**: If available, use the private "Report a vulnerability" form on GitHub.
 
 ### What to Include

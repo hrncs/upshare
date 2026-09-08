@@ -1,6 +1,8 @@
 # UpShare CLI
 
+[![Tests & Build](https://github.com/hrncs/upshare/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hrncs/upshare/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/upshare?color=blue)](https://www.npmjs.com/package/upshare)
+[![issues](https://img.shields.io/github/issues/hrncs/upshare)](https://github.com/hrncs/upshare/issues)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Official command-line interface for [UpShare](https://upshare.app). Upload,

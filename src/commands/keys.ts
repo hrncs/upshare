@@ -38,10 +38,14 @@ function resolveKeyTarget(
 
 export async function listKeysCommand(options?: {
   apiUrl?: string;
+  profile?: string;
 }): Promise<void> {
   const spinner = createSpinner("Fetching API keys...").start();
   try {
-    const client = new ApiClient({ apiUrl: options?.apiUrl });
+    const client = new ApiClient({
+      apiUrl: options?.apiUrl,
+      profile: options?.profile,
+    });
     const data = await client.listApiKeys();
     spinner.stop();
     if (data.apiKeys.length === 0) {
@@ -80,7 +84,7 @@ export async function listKeysCommand(options?: {
 export async function renameKeyCommand(
   target: string,
   name: string,
-  options?: { apiUrl?: string }
+  options?: { apiUrl?: string; profile?: string }
 ): Promise<void> {
   const trimmedName = name.trim();
   if (!(trimmedName.length >= 1 && trimmedName.length <= 64)) {
@@ -91,7 +95,10 @@ export async function renameKeyCommand(
 
   const spinner = createSpinner("Fetching API keys...").start();
   try {
-    const client = new ApiClient({ apiUrl: options?.apiUrl });
+    const client = new ApiClient({
+      apiUrl: options?.apiUrl,
+      profile: options?.profile,
+    });
     const data = await client.listApiKeys();
     const match = resolveKeyTarget(data.apiKeys, target, data.currentKeyId);
     if (!match) {

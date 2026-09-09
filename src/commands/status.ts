@@ -14,10 +14,15 @@ function checkLabel(check: { status: string }): string {
 
 export async function statusCommand(options?: {
   apiUrl?: string;
+  profile?: string;
 }): Promise<void> {
   const spinner = createSpinner("Checking UpShare status...").start();
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
-  const showSupport = getEffectiveApiUrl(options?.apiUrl) === DEFAULT_API_URL;
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
+  const showSupport =
+    getEffectiveApiUrl(options?.apiUrl, options?.profile) === DEFAULT_API_URL;
 
   try {
     const data = await client.checkHealth();

@@ -56,7 +56,7 @@ function printPartialInfo(
 
 export async function infoCommand(
   target: string,
-  options?: { apiUrl?: string }
+  options?: { apiUrl?: string; profile?: string }
 ): Promise<void> {
   const id = cleanIdentifier(target);
   if (!id) {
@@ -65,7 +65,10 @@ export async function infoCommand(
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner("Fetching file info...").start();
 
   try {

@@ -7,7 +7,7 @@ import { createSpinner } from "../lib/spinner";
 
 export async function deleteCommand(
   target: string,
-  options?: { apiUrl?: string; yes?: boolean }
+  options?: { apiUrl?: string; profile?: string; yes?: boolean }
 ): Promise<void> {
   const id = cleanIdentifier(target);
   if (!id) {
@@ -42,7 +42,10 @@ export async function deleteCommand(
     }
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner(`Deleting file '${id}'...`).start();
 
   try {

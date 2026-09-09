@@ -1,6 +1,6 @@
 import pc from "picocolors";
 import { z } from "zod";
-import { loadConfig, saveConfig } from "./config";
+import { loadConfig, saveGlobal } from "./config";
 
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const NPM_REGISTRY_URL = "https://registry.npmjs.org/upshare/latest";
@@ -58,7 +58,7 @@ export async function checkForUpdate(
     const latest = parsed.success ? parsed.data.version : undefined;
 
     if (latest) {
-      saveConfig({
+      saveGlobal({
         lastUpdateCheck: now,
         latestVersion: latest,
       });

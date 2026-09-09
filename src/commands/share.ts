@@ -7,7 +7,7 @@ import { parseDurationHours } from "../lib/validation";
 
 export async function shareCommand(
   target: string,
-  options?: { apiUrl?: string; duration?: string }
+  options?: { apiUrl?: string; duration?: string; profile?: string }
 ): Promise<void> {
   const id = cleanIdentifier(target);
   if (!id) {
@@ -25,7 +25,10 @@ export async function shareCommand(
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner(`Generating share link for '${id}'...`).start();
 
   try {
@@ -57,7 +60,7 @@ export async function shareCommand(
 
 export async function revokeCommand(
   target: string,
-  options?: { apiUrl?: string }
+  options?: { apiUrl?: string; profile?: string }
 ): Promise<void> {
   const id = cleanIdentifier(target);
   if (!id) {
@@ -66,7 +69,10 @@ export async function revokeCommand(
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner(
     `Revoking public share link for '${id}'...`
   ).start();

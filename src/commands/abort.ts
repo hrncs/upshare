@@ -78,10 +78,14 @@ export async function abortCommand(
   target?: string,
   options?: {
     apiUrl?: string;
+    profile?: string;
     yes?: boolean;
   }
 ): Promise<void> {
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner("Fetching unfinished uploads...").start();
 
   let pending: UserFileItem[];

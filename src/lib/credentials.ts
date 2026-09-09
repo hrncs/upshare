@@ -1,18 +1,20 @@
 import { createRequire } from "node:module";
 import type { Entry as KeyringEntry } from "@napi-rs/keyring";
 import { z } from "zod";
+import { DEFAULT_PROFILE, normalizeProfileName } from "./config";
 
 const API_KEY_ENVIRONMENT_VARIABLE = "UPSHARE_API_KEY";
 const CREDENTIAL_SERVICE = "UpShare CLI";
+const PROFILE_ACCOUNT_SEPARATOR = "::";
 const AMBIGUOUS_ERROR_PATTERN = /ambiguous/i;
 const apiKeySchema = z.string().trim().min(1);
 const runtimeRequire = createRequire(import.meta.url);
 
 export interface CredentialBackend {
-  delete: (apiUrl: string) => boolean;
-  get: (apiUrl: string) => string | undefined;
+  delete: (account: string) => boolean;
+  get: (account: string) => string | undefined;
   list?: () => string[];
-  set: (apiUrl: string, apiKey: string) => void;
+  set: (account: string, apiKey: string) => void;
 }
 
 export interface ResolvedCredential {
@@ -188,6 +190,36 @@ export function getEnvironmentApiKey(): string | undefined {
   return parsed.data;
 }
 
+export function getKeyringAccount(profile: string, apiUrl: string): string {
+  return `${normalizeProfileName(profile)}${PROFILE_ACCOUNT_SEPARATOR}${apiUrl}`;
+}
+
+export function parseKeyringAccount(account: string): {
+  apiUrl: string;
+  profile: string;
+} {
+  const separator = account.indexOf(PROFILE_ACCOUNT_SEPARATOR);
+  if (separator < 0) {
+    return { apiUrl: account, profile: DEFAULT_PROFILE };
+  }
+  return {
+    apiUrl: account.slice(separator + PROFILE_ACCOUNT_SEPARATOR.length),
+    profile: account.slice(0, separator),
+  };
+}
+
+function toResolvedCredential(
+  storedApiKey: string | undefined
+): ResolvedCredential | undefined {
+  if (!storedApiKey) {
+    return undefined;
+  }
+  const parsed = apiKeySchema.safeParse(storedApiKey);
+  return parsed.success
+    ? { apiKey: parsed.data, source: "keyring" }
+    : undefined;
+}
+
 export function resolveApiKey(
   apiUrl: string,
   backend: CredentialBackend = nativeCredentialBackend
@@ -197,14 +229,42 @@ export function resolveApiKey(
     return { apiKey: environmentApiKey, source: "environment" };
   }
 
-  const storedApiKey = backend.get(apiUrl);
-  if (!storedApiKey) {
+  return toResolvedCredential(backend.get(apiUrl));
+}
+
+export function resolveProfileApiKey(
+  profile: string,
+  apiUrl: string,
+  backend: CredentialBackend = nativeCredentialBackend
+): ResolvedCredential | undefined {
+  const environmentApiKey = getEnvironmentApiKey();
+  if (environmentApiKey) {
+    return { apiKey: environmentApiKey, source: "environment" };
+  }
+
+  const account = getKeyringAccount(profile, apiUrl);
+  const stored = toResolvedCredential(backend.get(account));
+  if (stored) {
+    return stored;
+  }
+  if (normalizeProfileName(profile) !== DEFAULT_PROFILE) {
     return undefined;
   }
-  const parsed = apiKeySchema.safeParse(storedApiKey);
-  return parsed.success
-    ? { apiKey: parsed.data, source: "keyring" }
-    : undefined;
+  const legacy = toResolvedCredential(backend.get(apiUrl));
+  if (!legacy) {
+    return undefined;
+  }
+  try {
+    backend.set(account, legacy.apiKey);
+    try {
+      backend.delete(apiUrl);
+    } catch {
+      // Ignore legacy cleanup failure; the credential remains readable.
+    }
+  } catch {
+    // Ignore migration failure and fall back to the legacy entry.
+  }
+  return legacy;
 }
 
 export function ensureCredentialStoreAccessible(
@@ -272,6 +332,51 @@ export function storeApiKeyWithRollback(
     }
     throw error;
   }
+}
+
+export function storeProfileApiKeyWithRollback(
+  profile: string,
+  apiUrl: string,
+  apiKey: string,
+  commitMetadata: () => void,
+  backend: CredentialBackend = nativeCredentialBackend
+): void {
+  const account = getKeyringAccount(profile, apiUrl);
+  storeApiKeyWithRollback(account, apiKey, commitMetadata, backend);
+  if (normalizeProfileName(profile) === DEFAULT_PROFILE) {
+    try {
+      backend.delete(apiUrl);
+    } catch {
+      // Ignore legacy cleanup failure; the migrated entry is authoritative.
+    }
+  }
+}
+
+export function deleteProfileCredential(
+  profile: string,
+  apiUrl: string,
+  backend: CredentialBackend = nativeCredentialBackend
+): boolean {
+  const account = getKeyringAccount(profile, apiUrl);
+  const candidates =
+    normalizeProfileName(profile) === DEFAULT_PROFILE
+      ? [account, apiUrl]
+      : [account];
+  let removed = false;
+  let firstError: unknown;
+  for (const candidate of candidates) {
+    try {
+      if (backend.delete(candidate)) {
+        removed = true;
+      }
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError !== undefined && !removed) {
+    throw firstError;
+  }
+  return removed;
 }
 
 export function deleteStoredApiKey(

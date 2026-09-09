@@ -127,6 +127,7 @@ async function listPendingCommand(options?: {
   all?: boolean;
   apiUrl?: string;
   page?: string;
+  profile?: string;
 }): Promise<void> {
   const parsedPage = pageSchema.safeParse(options?.page ?? "1");
   if (!parsedPage.success) {
@@ -140,7 +141,10 @@ async function listPendingCommand(options?: {
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner("Fetching partial uploads...").start();
 
   try {
@@ -204,6 +208,7 @@ export async function listCommand(options?: {
   apiUrl?: string;
   page?: string;
   pending?: boolean;
+  profile?: string;
 }): Promise<void> {
   if (options?.pending) {
     await listPendingCommand(options);
@@ -221,7 +226,10 @@ export async function listCommand(options?: {
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner("Fetching active files...").start();
 
   try {

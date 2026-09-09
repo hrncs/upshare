@@ -1,16 +1,21 @@
 import readline from "node:readline";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
-import { getEffectiveApiUrl, saveConfig } from "../lib/config";
 import {
-  type CredentialBackend,
+  resolveCommandContext,
+  saveProfile,
+  setCurrentProfile,
+} from "../lib/config";
+import type { CredentialBackend } from "../lib/credentials";
+import {
   ensureCredentialStoreAccessible,
   getApiKeyPrefix,
   getCredentialStoreName,
   getEnvironmentApiKey,
+  getKeyringAccount,
   maskApiKey,
   nativeCredentialBackend,
-  storeApiKeyWithRollback,
+  storeProfileApiKeyWithRollback,
 } from "../lib/credentials";
 import { sanitizeTerminalText } from "../lib/format";
 import { printError, printFields, printWarning } from "../lib/output";
@@ -73,19 +78,29 @@ function promptApiKey(): Promise<string> {
 export async function loginCommand(options?: {
   apiUrl?: string;
   backend?: CredentialBackend;
+  profile?: string;
 }): Promise<void> {
   const backend = options?.backend ?? nativeCredentialBackend;
-  let apiUrl: string;
+  let context: { apiUrl: string; profile: string };
   try {
-    apiUrl = getEffectiveApiUrl(options?.apiUrl);
+    context = resolveCommandContext({
+      apiUrl: options?.apiUrl,
+      profile: options?.profile,
+    });
   } catch (error) {
-    printError(error instanceof Error ? error.message : "Invalid API URL.");
+    printError(
+      error instanceof Error ? error.message : "Invalid login options."
+    );
     process.exitCode = 1;
     return;
   }
+  const { apiUrl, profile } = context;
 
   try {
-    ensureCredentialStoreAccessible(apiUrl, backend);
+    ensureCredentialStoreAccessible(
+      getKeyringAccount(profile, apiUrl),
+      backend
+    );
   } catch (error) {
     printError(
       error instanceof Error
@@ -114,13 +129,14 @@ export async function loginCommand(options?: {
   const spinner = createSpinner("Verifying API Key...").start();
 
   try {
-    const client = new ApiClient({ apiKey: key, apiUrl });
+    const client = new ApiClient({ apiKey: key, apiUrl, profile });
     const data = await client.verifyApiKey(key);
-    storeApiKeyWithRollback(
+    storeProfileApiKeyWithRollback(
+      profile,
       apiUrl,
       key,
       () => {
-        saveConfig({
+        saveProfile(profile, {
           apiUrl,
           keyPrefix: getApiKeyPrefix(key),
           user: data.user,
@@ -128,10 +144,12 @@ export async function loginCommand(options?: {
       },
       backend
     );
+    setCurrentProfile(profile);
 
     spinner.succeed(`✓ Logged in as ${data.user.name}`);
     console.log();
     printFields([
+      ["Profile", profile],
       ["Email", data.user.email],
       ["API key", pc.gray(sanitizeTerminalText(maskApiKey(key)))],
       ["Credential", getCredentialStoreName()],

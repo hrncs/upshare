@@ -4,14 +4,19 @@ import {
   __setKeyringEntryFactoryForTesting,
   type CredentialBackend,
   deleteAllStoredApiKeys,
+  deleteProfileCredential,
   deleteStoredApiKey,
   ensureCredentialStoreAccessible,
   getApiKeyPrefix,
   getCredentialStoreName,
+  getKeyringAccount,
   maskApiKey,
   nativeCredentialBackend,
+  parseKeyringAccount,
   resolveApiKey,
+  resolveProfileApiKey,
   storeApiKeyWithRollback,
+  storeProfileApiKeyWithRollback,
 } from "./credentials";
 
 const apiUrl = "https://upshare.app";
@@ -312,5 +317,99 @@ describe("credential presentation", () => {
     expect(getCredentialStoreName("win32")).toBe("Windows Credential Manager");
     expect(getCredentialStoreName("darwin")).toBe("macOS Keychain");
     expect(getCredentialStoreName("linux")).toBe("Linux Secret Service");
+  });
+});
+
+describe("profile credentials", () => {
+  it("keys accounts by profile and api url", () => {
+    expect(getKeyringAccount("Work", "https://example.com")).toBe(
+      "work::https://example.com"
+    );
+    expect(parseKeyringAccount("work::https://example.com")).toEqual({
+      apiUrl: "https://example.com",
+      profile: "work",
+    });
+    expect(parseKeyringAccount("https://example.com")).toEqual({
+      apiUrl: "https://example.com",
+      profile: "default",
+    });
+  });
+
+  it("isolates profiles sharing one domain", () => {
+    const store = new Map<string, string>();
+    const backend: CredentialBackend = {
+      delete: (account) => store.delete(account),
+      get: (account) => store.get(account),
+      set: (account, apiKey) => {
+        store.set(account, apiKey);
+      },
+    };
+    storeProfileApiKeyWithRollback(
+      "own",
+      apiUrl,
+      "ups_own_secret",
+      () => undefined,
+      backend
+    );
+    storeProfileApiKeyWithRollback(
+      "work",
+      apiUrl,
+      "ups_work_secret",
+      () => undefined,
+      backend
+    );
+    expect(resolveProfileApiKey("own", apiUrl, backend)?.apiKey).toBe(
+      "ups_own_secret"
+    );
+    expect(resolveProfileApiKey("work", apiUrl, backend)?.apiKey).toBe(
+      "ups_work_secret"
+    );
+  });
+
+  it("migrates the legacy default entry on first read", () => {
+    const store = new Map<string, string>([[apiUrl, "ups_legacy_secret"]]);
+    const backend: CredentialBackend = {
+      delete: (account) => store.delete(account),
+      get: (account) => store.get(account),
+      set: (account, apiKey) => {
+        store.set(account, apiKey);
+      },
+    };
+    expect(resolveProfileApiKey("default", apiUrl, backend)?.apiKey).toBe(
+      "ups_legacy_secret"
+    );
+    expect(store.get(`default::${apiUrl}`)).toBe("ups_legacy_secret");
+    expect(store.has(apiUrl)).toBe(false);
+  });
+
+  it("does not apply the legacy fallback to named profiles", () => {
+    const store = new Map<string, string>([[apiUrl, "ups_legacy_secret"]]);
+    const set = vi.fn((account: string, apiKey: string) => {
+      store.set(account, apiKey);
+    });
+    const backend: CredentialBackend = {
+      delete: (account) => store.delete(account),
+      get: (account) => store.get(account),
+      set,
+    };
+    expect(resolveProfileApiKey("work", apiUrl, backend)).toBeUndefined();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("deletes both the migrated and legacy default entries", () => {
+    const store = new Map<string, string>([
+      [`default::${apiUrl}`, "ups_new_secret"],
+      [apiUrl, "ups_legacy_secret"],
+    ]);
+    const backend: CredentialBackend = {
+      delete: (account) => store.delete(account),
+      get: (account) => store.get(account),
+      set: (account, apiKey) => {
+        store.set(account, apiKey);
+      },
+    };
+    expect(deleteProfileCredential("default", apiUrl, backend)).toBe(true);
+    expect(store.size).toBe(0);
+    expect(deleteProfileCredential("default", apiUrl, backend)).toBe(false);
   });
 });

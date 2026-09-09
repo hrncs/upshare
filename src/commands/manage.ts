@@ -147,7 +147,7 @@ async function executeAction(
   action: string,
   identifier: string,
   chosenFile: UserFileItem | null,
-  options?: { apiUrl?: string }
+  options?: { apiUrl?: string; profile?: string }
 ): Promise<void> {
   switch (action) {
     case "1": {
@@ -164,28 +164,44 @@ async function executeAction(
         await shareCommand(identifier, {
           apiUrl: options?.apiUrl,
           duration: "24",
+          profile: options?.profile,
         });
       }
       break;
     }
     case "2": {
-      await shareCommand(identifier, { apiUrl: options?.apiUrl });
+      await shareCommand(identifier, {
+        apiUrl: options?.apiUrl,
+        profile: options?.profile,
+      });
       break;
     }
     case "3": {
-      await extendCommand(identifier, { apiUrl: options?.apiUrl });
+      await extendCommand(identifier, {
+        apiUrl: options?.apiUrl,
+        profile: options?.profile,
+      });
       break;
     }
     case "4": {
-      await revokeCommand(identifier, { apiUrl: options?.apiUrl });
+      await revokeCommand(identifier, {
+        apiUrl: options?.apiUrl,
+        profile: options?.profile,
+      });
       break;
     }
     case "5": {
-      await downloadCommand(identifier, { apiUrl: options?.apiUrl });
+      await downloadCommand(identifier, {
+        apiUrl: options?.apiUrl,
+        profile: options?.profile,
+      });
       break;
     }
     case "6": {
-      await deleteCommand(identifier, { apiUrl: options?.apiUrl });
+      await deleteCommand(identifier, {
+        apiUrl: options?.apiUrl,
+        profile: options?.profile,
+      });
       break;
     }
     default: {
@@ -197,9 +213,12 @@ async function executeAction(
 
 export async function manageCommand(
   target?: string,
-  options?: { apiUrl?: string }
+  options?: { apiUrl?: string; profile?: string }
 ): Promise<void> {
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   let chosenFile: UserFileItem | null = null;
 
   if (target) {

@@ -7,7 +7,7 @@ import { parseDurationHours } from "../lib/validation";
 
 export async function extendCommand(
   target: string,
-  options?: { apiUrl?: string; duration?: string }
+  options?: { apiUrl?: string; duration?: string; profile?: string }
 ): Promise<void> {
   const id = cleanIdentifier(target);
   if (!id) {
@@ -25,7 +25,10 @@ export async function extendCommand(
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner(`Extending expiration for '${id}'...`).start();
 
   try {

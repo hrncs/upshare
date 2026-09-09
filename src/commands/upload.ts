@@ -3,7 +3,7 @@ import path from "node:path";
 import { Transform } from "node:stream";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
-import { getEffectiveApiUrl } from "../lib/config";
+import { resolveCommandContext } from "../lib/config";
 import { formatBytes, formatDuration } from "../lib/format";
 import { printError, printFields, printWarning } from "../lib/output";
 import type {
@@ -320,6 +320,7 @@ export interface UploadCommandOptions {
   apiUrl?: string;
   concurrency?: string;
   hours?: string;
+  profile?: string;
   retries?: string;
   share?: boolean;
   shareDuration?: string;
@@ -392,8 +393,11 @@ export async function uploadCommand(
     return;
   }
 
-  const apiUrl = getEffectiveApiUrl(options?.apiUrl);
-  const client = new ApiClient({ apiUrl });
+  const { apiUrl, profile } = resolveCommandContext({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
+  const client = new ApiClient({ apiUrl, profile });
   const spinner = createSpinner(
     `Preparing ${pc.bold(fileName)} (${formatBytes(fileSize)})...`
   ).start();
@@ -402,6 +406,7 @@ export async function uploadCommand(
     filePath: resolvedPath,
     fileSize,
     modifiedAt: stat.mtimeMs,
+    profile,
   };
   let preparation: UploadRequestResponse | MultipartResumeResponse | null =
     null;
@@ -428,7 +433,7 @@ export async function uploadCommand(
       spinner.text = "Checking resumable upload...";
       preparation = await client.getMultipartUpload(savedState.fileId);
       if (!preparation) {
-        clearUploadState(apiUrl, resolvedPath);
+        clearUploadState(profile, apiUrl, resolvedPath);
       }
     }
 
@@ -493,7 +498,7 @@ export async function uploadCommand(
       parts: completedParts,
       shareDurationHours,
     });
-    clearUploadState(apiUrl, resolvedPath);
+    clearUploadState(profile, apiUrl, resolvedPath);
 
     spinner.succeed(`Uploaded ${fileName}`);
 

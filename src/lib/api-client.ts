@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { getEffectiveApiUrl } from "./config";
-import { resolveApiKey } from "./credentials";
+import { resolveCommandContext } from "./config";
+import { resolveProfileApiKey } from "./credentials";
 import { cleanIdentifier, sanitizeTerminalText } from "./format";
 import type {
   CompletedUploadPart,
@@ -104,9 +104,19 @@ export class ApiClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly credentialError: Error | undefined;
+  private readonly profile: string;
 
-  constructor(options?: { apiKey?: string; apiUrl?: string }) {
-    this.apiUrl = getEffectiveApiUrl(options?.apiUrl);
+  constructor(options?: {
+    apiKey?: string;
+    apiUrl?: string;
+    profile?: string;
+  }) {
+    const context = resolveCommandContext({
+      apiUrl: options?.apiUrl,
+      profile: options?.profile,
+    });
+    this.profile = context.profile;
+    this.apiUrl = context.apiUrl;
 
     if (options?.apiKey) {
       this.apiKey = options.apiKey;
@@ -115,7 +125,8 @@ export class ApiClient {
     }
 
     try {
-      this.apiKey = resolveApiKey(this.apiUrl)?.apiKey ?? "";
+      this.apiKey =
+        resolveProfileApiKey(this.profile, this.apiUrl)?.apiKey ?? "";
       this.credentialError = undefined;
     } catch (error) {
       this.apiKey = "";

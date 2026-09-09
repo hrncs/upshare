@@ -32,6 +32,7 @@ export interface DownloadCommandOptions {
   concurrency?: string;
   force?: boolean;
   out?: string;
+  profile?: string;
   retries?: string;
 }
 
@@ -173,7 +174,10 @@ export async function downloadCommand(
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner(`Resolving ${pc.bold(target)}...`).start();
   let workPaths: ReturnType<typeof getDownloadWorkPaths> | undefined;
   let journal: DownloadJournal | undefined;

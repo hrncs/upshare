@@ -7,7 +7,7 @@ import { createSpinner } from "../lib/spinner";
 export async function renameCommand(
   target: string,
   fileName: string,
-  options?: { apiUrl?: string }
+  options?: { apiUrl?: string; profile?: string }
 ): Promise<void> {
   const id = cleanIdentifier(target);
   if (!id) {
@@ -22,7 +22,10 @@ export async function renameCommand(
     return;
   }
 
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const spinner = createSpinner("Renaming file...").start();
 
   try {

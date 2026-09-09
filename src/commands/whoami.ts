@@ -1,7 +1,7 @@
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
-import { getEffectiveApiUrl } from "../lib/config";
-import { getApiKeyPrefix, resolveApiKey } from "../lib/credentials";
+import { resolveCommandContext } from "../lib/config";
+import { getApiKeyPrefix, resolveProfileApiKey } from "../lib/credentials";
 import { formatBytes, sanitizeTerminalText } from "../lib/format";
 import { printFields, printHeading } from "../lib/output";
 import { createSpinner } from "../lib/spinner";
@@ -10,9 +10,13 @@ const LEGACY_MONTHLY_QUOTA_BYTES = 53_687_091_200;
 
 export async function whoamiCommand(options?: {
   apiUrl?: string;
+  profile?: string;
 }): Promise<void> {
   const spinner = createSpinner("Fetching account details...").start();
-  const client = new ApiClient({ apiUrl: options?.apiUrl });
+  const client = new ApiClient({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
 
   try {
     const data = await client.verifyApiKey();
@@ -33,7 +37,12 @@ export async function whoamiCommand(options?: {
     const isLegacy =
       data.quota.isLegacy ??
       data.quota.maxQuotaBytes >= LEGACY_MONTHLY_QUOTA_BYTES;
+    const context = resolveCommandContext({
+      apiUrl: options?.apiUrl,
+      profile: options?.profile,
+    });
     const fields: [string, string][] = [
+      ["Profile", context.profile],
       ["Name", pc.bold(data.user.name)],
       ["Email", data.user.email],
       [
@@ -42,7 +51,7 @@ export async function whoamiCommand(options?: {
       ],
     ];
     try {
-      const resolved = resolveApiKey(getEffectiveApiUrl(options?.apiUrl));
+      const resolved = resolveProfileApiKey(context.profile, context.apiUrl);
       if (resolved) {
         const prefix = sanitizeTerminalText(getApiKeyPrefix(resolved.apiKey));
         const label =

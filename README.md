@@ -39,6 +39,9 @@ upshare signup
 # Authenticate with your API key (obtained from the web dashboard)
 upshare login
 
+# Log in to (or create) a specific profile
+upshare login -p own
+
 # Log in via browser 
 upshare login --web
 
@@ -55,7 +58,7 @@ upshare signup --no-browser
 # Check authenticated account profile and monthly upload limit
 upshare whoami
 
-# Clear stored credentials
+# Clear the active profile's stored credential (keeps its API URL)
 upshare logout
 
 # Remove stored credentials for all API URLs (e.g. prod + localhost)
@@ -67,9 +70,45 @@ code expires after ten minutes and can issue credentials only once. The API key
 remains valid until you revoke it.
 
 For CI or headless environments, inject the key as `UPSHARE_API_KEY`. The
-environment variable takes precedence and is never persisted by the CLI.
+environment variable takes precedence over the active profile's stored
+credential and is never persisted by the CLI.
 
-### 2. Uploading Files
+### 2. Profiles
+
+Each profile binds one domain to one account, so personal, work, and
+self-hosted servers can coexist. Two profiles may point at the same domain
+with different accounts.
+
+```bash
+# Add a profile for a self-hosted server (defaults to https://upshare.app)
+upshare profile add own --api-url https://files.example.com
+
+# Log in to it (also makes it the active profile)
+upshare login -p own
+
+# Run any command against a non-active profile without switching
+upshare upload ./report.pdf -p own
+upshare list -p work
+
+# Switch the active profile
+upshare profile use work
+
+# Inspect profiles
+upshare profile list
+upshare profile show own
+
+# Remove a profile and its stored credential
+upshare profile remove own --yes
+```
+
+Profile names are lowercase letters, numbers, `_`, `-` (max 64 chars).
+Resolution order: `-p/--profile` flag, then `UPSHARE_PROFILE`, then the
+profile set with `profile use`, then `default`. `--api-url` (flag or
+`UPSHARE_API_URL`) always overrides the profile's domain, and
+`UPSHARE_API_KEY` always overrides its stored credential — nothing is
+hardcoded to one domain.
+
+### 3. Uploading Files
 ```bash
 # Upload and automatically generate a public share link (default 24 hours)
 upshare upload ./document.pdf
@@ -89,7 +128,7 @@ Large files resume where they left off by re-running the same upload command.
 If you stop an upload halfway, it still blocks space until you free it. Run
 `upshare abort` to get that space back.
 
-### 3. Aborting Unfinished Uploads
+### 4. Aborting Unfinished Uploads
 ```bash
 # Show unfinished uploads and remove them (prompts for confirmation)
 upshare abort
@@ -105,7 +144,7 @@ The optional target must be an unfinished upload ID (as listed by
 `upshare abort` or `upshare list --pending`). Active files are never deleted
 through this command.
 
-### 4. List Files
+### 5. List Files
 ```bash
 # List the 20 most recent active files (list, ls)
 upshare list
@@ -120,7 +159,7 @@ upshare list --all
 upshare list --pending
 ```
 
-### 5. Sharing & Links
+### 6. Sharing & Links
 ```bash
 # Create or retrieve a share link (default: 24 hours)
 upshare share <fileId-or-token>
@@ -135,7 +174,7 @@ upshare extend <fileId-or-token> --duration 72
 upshare revoke <fileId-or-token>
 ```
 
-### 6. Downloading Files
+### 7. Downloading Files
 ```bash
 # Download by public share link URL
 upshare download https://upshare.app/s/abcdef12
@@ -150,7 +189,7 @@ upshare download abcdef12 --force
 upshare download abcdef12 --concurrency 16 --retries 10
 ```
 
-### 7. Deleting Files
+### 8. Deleting Files
 ```bash
 # Delete a file permanently (delete, rm; prompts for confirmation)
 upshare delete <fileId-or-token>
@@ -159,19 +198,19 @@ upshare delete <fileId-or-token>
 upshare delete <fileId-or-token> --yes
 ```
 
-### 8. Renaming Files
+### 9. Renaming Files
 ```bash
 # Rename an uploaded file 
 upshare rename <fileId-or-token> "Dunder-Mifflin-2026-Audit.pdf"
 ```
 
-### 9. Interactive File Manager
+### 10. Interactive File Manager
 ```bash
 # Launch interactive terminal file manager (manage, files)
 upshare manage
 ```
 
-### 10. File Details
+### 11. File Details
 ```bash
 # Show everything about one file: size, expiry, share link, views
 upshare info <fileId-or-token>
@@ -189,13 +228,16 @@ upshare info <fileId-or-token>
 - `-f, --force`: Overwrite existing destination file when downloading.
 - `-y, --yes`: Skip confirmation prompts when aborting unfinished uploads or deleting files.
 - `--api-url <url>`: Override UpShare backend URL (default: `https://upshare.app`).
+- `-p, --profile <name>`: Run against a specific profile (or set `UPSHARE_PROFILE`).
 
->API keys are stored in Windows Credential Manager, macOS Keychain, or Linux
->Secret Service. `~/.upshare/config.json` contains only non-secret settings and a
->key prefix. Use `upshare logout` to remove the stored credential. On a
->headless Linux system without Secret Service, provide `UPSHARE_API_KEY` through
->your CI or process secret manager. Custom API URLs must use HTTPS, except for
->localhost development.
+>API keys are stored per profile in Windows Credential Manager, macOS
+>Keychain, or Linux Secret Service. `~/.upshare/config.json` contains only
+>non-secret settings and key prefixes. Use `upshare logout` to remove the
+>active profile's stored credential (its domain is kept), `upshare profile
+>remove <name>` to drop a profile entirely, or `upshare logout --all` to
+>remove everything. On a headless Linux system without Secret Service,
+>provide `UPSHARE_API_KEY` through your CI or process secret manager. Custom
+>API URLs must use HTTPS, except for localhost development.
 ## License
 
 [MIT](LICENSE) © 2026 Himanshu Ranjan

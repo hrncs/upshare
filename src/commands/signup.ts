@@ -1,17 +1,22 @@
 import os from "node:os";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
-import { getEffectiveApiUrl, saveConfig } from "../lib/config";
+import {
+  resolveCommandContext,
+  saveProfile,
+  setCurrentProfile,
+} from "../lib/config";
 import {
   type CredentialBackend,
   ensureCredentialStoreAccessible,
   getApiKeyPrefix,
   getCredentialStoreName,
   getEnvironmentApiKey,
+  getKeyringAccount,
   maskApiKey,
   nativeCredentialBackend,
-  resolveApiKey,
-  storeApiKeyWithRollback,
+  resolveProfileApiKey,
+  storeProfileApiKeyWithRollback,
 } from "../lib/credentials";
 import { openBrowser, pollForDeviceToken } from "../lib/device-flow";
 import { sanitizeTerminalText } from "../lib/format";
@@ -30,19 +35,30 @@ export interface SignupOptions {
   backend?: CredentialBackend;
   mode?: "signup" | "login";
   noBrowser?: boolean;
+  profile?: string;
 }
 
-function resolveApiUrl(options?: SignupOptions): string {
+function resolveSignupContext(options?: SignupOptions): {
+  apiUrl: string;
+  profile: string;
+} {
+  const context = resolveCommandContext({
+    apiUrl: options?.apiUrl,
+    profile: options?.profile,
+  });
   const backend = options?.backend ?? nativeCredentialBackend;
-  const apiUrl = getEffectiveApiUrl(options?.apiUrl);
   const mode = options?.mode ?? "signup";
-  const existing = resolveApiKey(apiUrl, backend);
+  const existing = resolveProfileApiKey(
+    context.profile,
+    context.apiUrl,
+    backend
+  );
   if (existing && mode === "signup") {
     throw new Error(
       "Already logged in. Run `upshare logout` first or `upshare login --web` for an additional browser key."
     );
   }
-  return apiUrl;
+  return context;
 }
 
 function buildDeviceKeyName(): string | undefined {
@@ -60,16 +76,18 @@ function buildDeviceKeyName(): string | undefined {
 }
 
 function storeAuthorization(
+  profile: string,
   apiUrl: string,
   authorization: DeviceTokenResponse,
   backend: CredentialBackend = nativeCredentialBackend
 ): string {
   const rawKey = authorization.access_token;
-  storeApiKeyWithRollback(
+  storeProfileApiKeyWithRollback(
+    profile,
     apiUrl,
     rawKey,
     () => {
-      saveConfig({
+      saveProfile(profile, {
         apiUrl,
         keyPrefix: getApiKeyPrefix(rawKey),
         user: authorization.user,
@@ -77,16 +95,19 @@ function storeAuthorization(
     },
     backend
   );
+  setCurrentProfile(profile);
   return rawKey;
 }
 
 function printSignupSuccess(
+  profile: string,
   apiUrl: string,
   user: { email: string; name: string },
   rawKey: string
 ): void {
   console.log();
   printFields([
+    ["Profile", profile],
     ["Email", user.email],
     ["API key", pc.gray(sanitizeTerminalText(maskApiKey(rawKey)))],
     ["Credential", getCredentialStoreName()],
@@ -124,9 +145,9 @@ function printAuthorizationInstructions(
 export async function signupCommand(options?: SignupOptions): Promise<void> {
   const mode = options?.mode ?? "signup";
   const backend = options?.backend ?? nativeCredentialBackend;
-  let apiUrl: string;
+  let context: { apiUrl: string; profile: string };
   try {
-    apiUrl = resolveApiUrl(options);
+    context = resolveSignupContext(options);
   } catch (error) {
     printError(
       error instanceof Error ? error.message : "Invalid signup options."
@@ -134,9 +155,13 @@ export async function signupCommand(options?: SignupOptions): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const { apiUrl, profile } = context;
 
   try {
-    ensureCredentialStoreAccessible(apiUrl, backend);
+    ensureCredentialStoreAccessible(
+      getKeyringAccount(profile, apiUrl),
+      backend
+    );
   } catch (error) {
     printError(
       error instanceof Error
@@ -147,7 +172,7 @@ export async function signupCommand(options?: SignupOptions): Promise<void> {
     return;
   }
 
-  const client = new ApiClient({ apiUrl });
+  const client = new ApiClient({ apiUrl, profile });
   let authorization: DeviceAuthorizationResponse;
   try {
     authorization = await client.requestDeviceAuthorization(
@@ -176,14 +201,14 @@ export async function signupCommand(options?: SignupOptions): Promise<void> {
       intervalSeconds: authorization.interval,
       requestToken: () => client.requestDeviceToken(authorization.device_code),
     });
-    const rawKey = storeAuthorization(apiUrl, token, backend);
+    const rawKey = storeAuthorization(profile, apiUrl, token, backend);
     if (mode === "login") {
       spinner.succeed(`✓ Logged in as ${token.user.name}`);
     } else {
       spinner.succeed("✓ Account created");
       console.log(`Signed in as ${token.user.name}`);
     }
-    printSignupSuccess(apiUrl, token.user, rawKey);
+    printSignupSuccess(profile, apiUrl, token.user, rawKey);
   } catch (error) {
     spinner.fail(
       error instanceof Error ? error.message : "Browser authorization failed"

@@ -445,10 +445,11 @@ program
   .command("logout")
   .description("Clear stored API credentials")
   .option("--api-url <url>", "Override UpShare backend API URL")
-  .action((cmdOptions: { apiUrl?: string }) => {
+  .option("--all", "Remove stored credentials for all API URLs")
+  .action((cmdOptions: { all?: boolean; apiUrl?: string }) => {
     const options = program.opts();
     const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-    logoutCommand({ apiUrl });
+    logoutCommand({ all: cmdOptions.all, apiUrl });
   });
 
 program.allowExcessArguments();

@@ -3,10 +3,13 @@ import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
 import { getEffectiveApiUrl, saveConfig } from "../lib/config";
 import {
+  type CredentialBackend,
+  ensureCredentialStoreAccessible,
   getApiKeyPrefix,
   getCredentialStoreName,
   getEnvironmentApiKey,
   maskApiKey,
+  nativeCredentialBackend,
   resolveApiKey,
   storeApiKeyWithRollback,
 } from "../lib/credentials";
@@ -24,27 +27,20 @@ const HOST_WHITESPACE_REGEX = /\s+/g;
 
 export interface SignupOptions {
   apiUrl?: string;
+  backend?: CredentialBackend;
   mode?: "signup" | "login";
   noBrowser?: boolean;
 }
 
 function resolveApiUrl(options?: SignupOptions): string {
+  const backend = options?.backend ?? nativeCredentialBackend;
   const apiUrl = getEffectiveApiUrl(options?.apiUrl);
   const mode = options?.mode ?? "signup";
-  try {
-    const existing = resolveApiKey(apiUrl);
-    if (existing && mode === "signup") {
-      throw new Error(
-        "Already logged in. Run `upshare logout` first or `upshare login --web` for an additional browser key."
-      );
-    }
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.startsWith("Already logged in")
-    ) {
-      throw error;
-    }
+  const existing = resolveApiKey(apiUrl, backend);
+  if (existing && mode === "signup") {
+    throw new Error(
+      "Already logged in. Run `upshare logout` first or `upshare login --web` for an additional browser key."
+    );
   }
   return apiUrl;
 }
@@ -65,16 +61,22 @@ function buildDeviceKeyName(): string | undefined {
 
 function storeAuthorization(
   apiUrl: string,
-  authorization: DeviceTokenResponse
+  authorization: DeviceTokenResponse,
+  backend: CredentialBackend = nativeCredentialBackend
 ): string {
   const rawKey = authorization.access_token;
-  storeApiKeyWithRollback(apiUrl, rawKey, () => {
-    saveConfig({
-      apiUrl,
-      keyPrefix: getApiKeyPrefix(rawKey),
-      user: authorization.user,
-    });
-  });
+  storeApiKeyWithRollback(
+    apiUrl,
+    rawKey,
+    () => {
+      saveConfig({
+        apiUrl,
+        keyPrefix: getApiKeyPrefix(rawKey),
+        user: authorization.user,
+      });
+    },
+    backend
+  );
   return rawKey;
 }
 
@@ -121,12 +123,25 @@ function printAuthorizationInstructions(
 
 export async function signupCommand(options?: SignupOptions): Promise<void> {
   const mode = options?.mode ?? "signup";
+  const backend = options?.backend ?? nativeCredentialBackend;
   let apiUrl: string;
   try {
     apiUrl = resolveApiUrl(options);
   } catch (error) {
     printError(
       error instanceof Error ? error.message : "Invalid signup options."
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    ensureCredentialStoreAccessible(apiUrl, backend);
+  } catch (error) {
+    printError(
+      error instanceof Error
+        ? error.message
+        : "Could not access the credential store."
     );
     process.exitCode = 1;
     return;
@@ -161,7 +176,7 @@ export async function signupCommand(options?: SignupOptions): Promise<void> {
       intervalSeconds: authorization.interval,
       requestToken: () => client.requestDeviceToken(authorization.device_code),
     });
-    const rawKey = storeAuthorization(apiUrl, token);
+    const rawKey = storeAuthorization(apiUrl, token, backend);
     if (mode === "login") {
       spinner.succeed(`✓ Logged in as ${token.user.name}`);
     } else {

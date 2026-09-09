@@ -57,6 +57,9 @@ upshare whoami
 
 # Clear stored credentials
 upshare logout
+
+# Remove stored credentials for all API URLs (e.g. prod + localhost)
+upshare logout --all
 ```
 
 Browser login uses the OAuth 2.0 Device Authorization Grant. The verification

@@ -3,10 +3,13 @@ import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
 import { getEffectiveApiUrl, saveConfig } from "../lib/config";
 import {
+  type CredentialBackend,
+  ensureCredentialStoreAccessible,
   getApiKeyPrefix,
   getCredentialStoreName,
   getEnvironmentApiKey,
   maskApiKey,
+  nativeCredentialBackend,
   storeApiKeyWithRollback,
 } from "../lib/credentials";
 import { sanitizeTerminalText } from "../lib/format";
@@ -69,8 +72,38 @@ function promptApiKey(): Promise<string> {
 
 export async function loginCommand(options?: {
   apiUrl?: string;
+  backend?: CredentialBackend;
 }): Promise<void> {
-  const key = await promptApiKey();
+  const backend = options?.backend ?? nativeCredentialBackend;
+  let apiUrl: string;
+  try {
+    apiUrl = getEffectiveApiUrl(options?.apiUrl);
+  } catch (error) {
+    printError(error instanceof Error ? error.message : "Invalid API URL.");
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    ensureCredentialStoreAccessible(apiUrl, backend);
+  } catch (error) {
+    printError(
+      error instanceof Error
+        ? error.message
+        : "Could not access the credential store."
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  let key: string;
+  try {
+    key = await promptApiKey();
+  } catch (error) {
+    printError(error instanceof Error ? error.message : "Login cancelled.");
+    process.exitCode = 1;
+    return;
+  }
 
   if (!key) {
     printError("API key is required.");
@@ -81,16 +114,20 @@ export async function loginCommand(options?: {
   const spinner = createSpinner("Verifying API Key...").start();
 
   try {
-    const apiUrl = getEffectiveApiUrl(options?.apiUrl);
     const client = new ApiClient({ apiKey: key, apiUrl });
     const data = await client.verifyApiKey(key);
-    storeApiKeyWithRollback(apiUrl, key, () => {
-      saveConfig({
-        apiUrl,
-        keyPrefix: getApiKeyPrefix(key),
-        user: data.user,
-      });
-    });
+    storeApiKeyWithRollback(
+      apiUrl,
+      key,
+      () => {
+        saveConfig({
+          apiUrl,
+          keyPrefix: getApiKeyPrefix(key),
+          user: data.user,
+        });
+      },
+      backend
+    );
 
     spinner.succeed(`✓ Logged in as ${data.user.name}`);
     console.log();

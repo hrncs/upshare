@@ -6,7 +6,9 @@ import type {
   CompletedUploadPart,
   CompleteUploadResponse,
   DeleteFileResponse,
-  DeviceExchangeResponse,
+  DeviceAuthorizationResponse,
+  DeviceTokenErrorResponse,
+  DeviceTokenResponse,
   DownloadResponse,
   FileInfoResponse,
   HealthResponse,
@@ -23,7 +25,9 @@ import type {
 import {
   completeUploadResponseSchema,
   deleteFileResponseSchema,
-  deviceExchangeResponseSchema,
+  deviceAuthorizationResponseSchema,
+  deviceTokenErrorResponseSchema,
+  deviceTokenResponseSchema,
   downloadResponseSchema,
   fileInfoResponseSchema,
   healthResponseSchema,
@@ -56,14 +60,28 @@ function waitBeforeFinalizeRetry(attempt: number): Promise<void> {
 }
 const LEGACY_SINGLE_UPLOAD_LIMIT_BYTES = 5_363_466_240;
 export const FILE_LIST_PAGE_SIZE = 20;
-const apiErrorSchema = z.object({ error: z.string().min(1).optional() });
+const apiErrorSchema = z.object({
+  error: z.string().min(1).optional(),
+  error_description: z.string().min(1).optional(),
+});
+const DEVICE_CLIENT_ID = "upshare-cli";
+const DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
+
+export class RetryableApiError extends Error {
+  constructor(message: string, options: { cause: unknown }) {
+    super(message, options);
+    this.name = "RetryableApiError";
+  }
+}
 
 async function responseError(response: Response, fallback: string) {
   const body: unknown = await response.json().catch(() => null);
   const parsed = apiErrorSchema.safeParse(body);
   return new Error(
-    parsed.success && parsed.data.error
-      ? sanitizeTerminalText(parsed.data.error)
+    parsed.success && (parsed.data.error_description || parsed.data.error)
+      ? sanitizeTerminalText(
+          parsed.data.error_description ?? parsed.data.error ?? fallback
+        )
       : fallback
   );
 }
@@ -143,7 +161,7 @@ export class ApiClient {
       const timedOut =
         error instanceof Error &&
         (error.name === "AbortError" || error.name === "TimeoutError");
-      throw new Error(
+      throw new RetryableApiError(
         timedOut
           ? `Request to ${this.apiUrl} timed out.`
           : `Could not connect to ${this.apiUrl}.`,
@@ -174,26 +192,82 @@ export class ApiClient {
     return parseResponse(response, whoamiResponseSchema);
   }
 
-  async exchangeDeviceCode(
-    code: string,
-    state: string,
-    name?: string
-  ): Promise<DeviceExchangeResponse> {
-    if (!(code && state)) {
-      throw new Error("Invalid browser callback. Run the command again.");
+  async requestDeviceAuthorization(
+    deviceName?: string
+  ): Promise<DeviceAuthorizationResponse> {
+    const body = new URLSearchParams({ client_id: DEVICE_CLIENT_ID });
+    if (deviceName) {
+      body.set("device_name", deviceName);
     }
-    const response = await this.fetch("/api/cli/device/exchange", {
-      body: JSON.stringify(name ? { code, name, state } : { code, state }),
-      headers: { "Content-Type": "application/json" },
+    const response = await this.fetch("/api/cli/device/authorization", {
+      body,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       method: "POST",
     });
     if (!response.ok) {
       throw await responseError(
         response,
-        `Sign-in exchange failed (${response.status})`
+        `Could not start browser authorization (${response.status})`
       );
     }
-    return parseResponse(response, deviceExchangeResponseSchema);
+    const authorization = await parseResponse(
+      response,
+      deviceAuthorizationResponseSchema
+    );
+    const apiOrigin = new URL(this.apiUrl).origin;
+    const verificationUrl = new URL(authorization.verification_uri);
+    const completeVerificationUrl = new URL(
+      authorization.verification_uri_complete
+    );
+    const hasTrustedVerificationUrls =
+      verificationUrl.origin === apiOrigin &&
+      completeVerificationUrl.origin === apiOrigin &&
+      completeVerificationUrl.pathname === verificationUrl.pathname;
+    if (!hasTrustedVerificationUrls) {
+      throw new Error(
+        "The UpShare API returned an untrusted verification URL."
+      );
+    }
+    return authorization;
+  }
+
+  async requestDeviceToken(
+    deviceCode: string
+  ): Promise<
+    | { data: DeviceTokenResponse; status: "success" }
+    | { error: DeviceTokenErrorResponse; status: "error" }
+  > {
+    const body = new URLSearchParams({
+      client_id: DEVICE_CLIENT_ID,
+      device_code: deviceCode,
+      grant_type: DEVICE_GRANT_TYPE,
+    });
+    const response = await this.fetch("/api/cli/device/token", {
+      body,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      method: "POST",
+    });
+    if (response.ok) {
+      return {
+        data: await parseResponse(response, deviceTokenResponseSchema),
+        status: "success",
+      };
+    }
+
+    if (response.status >= 500) {
+      const serverError = await responseError(
+        response,
+        `Device authorization temporarily failed (${response.status}).`
+      );
+      throw new RetryableApiError(serverError.message, { cause: serverError });
+    }
+
+    const responseBody: unknown = await response.json().catch(() => null);
+    const parsed = deviceTokenErrorResponseSchema.safeParse(responseBody);
+    if (!parsed.success) {
+      throw new Error(`Device authorization failed (${response.status}).`);
+    }
+    return { error: parsed.data, status: "error" };
   }
 
   async checkHealth(): Promise<HealthResponse> {

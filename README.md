@@ -48,7 +48,7 @@ upshare keys
 # Rename an API key by id, prefix, name, or `current`
 upshare keys rename <key> <name>
 
-# Print the browser URL for headless machines
+# Print the verification URL and code for headless machines
 upshare login --web --no-browser
 upshare signup --no-browser
 
@@ -58,6 +58,10 @@ upshare whoami
 # Clear stored credentials
 upshare logout
 ```
+
+Browser login uses the OAuth 2.0 Device Authorization Grant. The verification
+code expires after ten minutes and can issue credentials only once. The API key
+remains valid until you revoke it.
 
 For CI or headless environments, inject the key as `UPSHARE_API_KEY`. The
 environment variable takes precedence and is never persisted by the CLI.

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiClient } from "./api-client";
+import { ApiClient, RetryableApiError } from "./api-client";
 
 let configDirectory = "";
 
@@ -136,6 +136,122 @@ describe("API client credentials", () => {
     await expect(client.getMultipartUpload("file-id")).resolves.toMatchObject({
       uploadedParts: [{ partNumber: 1 }],
     });
+  });
+});
+
+describe("OAuth device authorization", () => {
+  it("starts a form-encoded device authorization request", async () => {
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, _requestInit?: RequestInit) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              device_code: "a".repeat(43),
+              expires_in: 600,
+              interval: 5,
+              user_code: "ABCD-EFGH-JKMN-PQRS",
+              verification_uri: "https://upshare.app/cli/authorize",
+              verification_uri_complete:
+                "https://upshare.app/cli/authorize?user_code=ABCD-EFGH-JKMN-PQRS",
+            }),
+            { headers: { "Content-Type": "application/json" }, status: 200 }
+          )
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+
+    await client.requestDeviceAuthorization("CLI workstation");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://upshare.app/api/cli/device/authorization"
+    );
+    const init = fetchMock.mock.calls[0]?.[1];
+    expect(new Headers(init?.headers).get("Content-Type")).toBe(
+      "application/x-www-form-urlencoded"
+    );
+    const body = new URLSearchParams(String(init?.body));
+    expect(body.get("client_id")).toBe("upshare-cli");
+    expect(body.get("device_name")).toBe("CLI workstation");
+  });
+
+  it("returns standards-shaped pending token responses", async () => {
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, _requestInit?: RequestInit) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: "authorization_pending",
+              error_description: "Approval is pending.",
+            }),
+            { headers: { "Content-Type": "application/json" }, status: 400 }
+          )
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+
+    await expect(client.requestDeviceToken("a".repeat(43))).resolves.toEqual({
+      error: {
+        error: "authorization_pending",
+        error_description: "Approval is pending.",
+      },
+      status: "error",
+    });
+
+    const body = new URLSearchParams(
+      String(fetchMock.mock.calls[0]?.[1]?.body)
+    );
+    expect(body.get("grant_type")).toBe(
+      "urn:ietf:params:oauth:grant-type:device_code"
+    );
+    expect(body.get("device_code")).toBe("a".repeat(43));
+  });
+
+  it("rejects verification URLs from another origin", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              device_code: "a".repeat(43),
+              expires_in: 600,
+              interval: 5,
+              user_code: "ABCD-EFGH-JKMN-PQRS",
+              verification_uri: "https://attacker.example/authorize",
+              verification_uri_complete:
+                "https://attacker.example/authorize?user_code=ABCD",
+            }),
+            { headers: { "Content-Type": "application/json" }, status: 200 }
+          )
+        )
+      )
+    );
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+
+    await expect(client.requestDeviceAuthorization()).rejects.toThrow(
+      "untrusted verification URL"
+    );
+  });
+
+  it("marks token endpoint server failures as retryable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ error: "temporarily unavailable" }), {
+            headers: { "Content-Type": "application/json" },
+            status: 503,
+          })
+        )
+      )
+    );
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+
+    await expect(
+      client.requestDeviceToken("a".repeat(43))
+    ).rejects.toBeInstanceOf(RetryableApiError);
   });
 });
 

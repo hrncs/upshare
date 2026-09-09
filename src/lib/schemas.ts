@@ -199,15 +199,43 @@ export const renameApiKeyResponseSchema = z.object({
   apiKey: apiKeyItemSchema,
 });
 
-export const deviceExchangeResponseSchema = z.object({
-  apiKey: z.object({
+export const deviceAuthorizationResponseSchema = z.strictObject({
+  device_code: z.string().min(32).max(128),
+  expires_in: z.number().int().positive().max(3600),
+  interval: z.number().int().min(5).max(60),
+  user_code: z.string().regex(/^[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){3}$/),
+  verification_uri: z.url(),
+  verification_uri_complete: z.url(),
+});
+
+export const deviceTokenErrorResponseSchema = z.strictObject({
+  error: z.enum([
+    "access_denied",
+    "authorization_pending",
+    "expired_token",
+    "invalid_client",
+    "invalid_request",
+    "slow_down",
+    "unsupported_grant_type",
+  ]),
+  error_description: z
+    .string()
+    .min(1)
+    .max(512)
+    .transform(sanitizeTerminalText)
+    .optional(),
+});
+
+export const deviceTokenResponseSchema = z.strictObject({
+  access_token: z.string().min(1).startsWith("upshare_live_"),
+  api_key: z.strictObject({
     createdAt: dateString,
     id: z.string().min(1),
     keyPrefix: z.string().min(1),
     name: z.string().min(1),
   }),
-  key: z.string().min(1).startsWith("upshare_live_"),
-  user: z.object({
+  token_type: z.literal("Bearer"),
+  user: z.strictObject({
     email: z.email().transform(sanitizeTerminalText),
     id: z.string().min(1),
     name: displayText,
@@ -224,9 +252,13 @@ export const downloadResponseSchema = z.object({
 });
 
 export type WhoamiResponse = z.infer<typeof whoamiResponseSchema>;
-export type DeviceExchangeResponse = z.infer<
-  typeof deviceExchangeResponseSchema
+export type DeviceAuthorizationResponse = z.infer<
+  typeof deviceAuthorizationResponseSchema
 >;
+export type DeviceTokenErrorResponse = z.infer<
+  typeof deviceTokenErrorResponseSchema
+>;
+export type DeviceTokenResponse = z.infer<typeof deviceTokenResponseSchema>;
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 export type UploadRequestResponse = z.infer<typeof uploadRequestResponseSchema>;
 export interface CompletedUploadPart {

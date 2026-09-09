@@ -1,5 +1,4 @@
 import os from "node:os";
-import readline from "node:readline";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
 import { getEffectiveApiUrl, saveConfig } from "../lib/config";
@@ -11,44 +10,26 @@ import {
   resolveApiKey,
   storeApiKeyWithRollback,
 } from "../lib/credentials";
-import {
-  buildAuthorizeUrl,
-  DEVICE_FLOW_TIMEOUT_MS,
-  generateDeviceState,
-  openBrowser,
-  startLoopbackServer,
-} from "../lib/device-flow";
+import { openBrowser, pollForDeviceToken } from "../lib/device-flow";
 import { sanitizeTerminalText } from "../lib/format";
 import { printError, printFields, printWarning } from "../lib/output";
+import type {
+  DeviceAuthorizationResponse,
+  DeviceTokenResponse,
+} from "../lib/schemas";
 import { createSpinner } from "../lib/spinner";
+
+const NON_PRINTABLE_HOST_CHARACTERS_REGEX = /[^\x20-\x7e]+/g;
+const HOST_WHITESPACE_REGEX = /\s+/g;
 
 export interface SignupOptions {
   apiUrl?: string;
   mode?: "signup" | "login";
   noBrowser?: boolean;
-  port?: number;
-  timeoutMs?: number;
 }
 
-function parsePort(raw: string | number | undefined): number | undefined {
-  if (raw === undefined) {
-    return undefined;
-  }
-  const port = typeof raw === "string" ? Number.parseInt(raw, 10) : raw;
-  if (!Number.isSafeInteger(port) || port <= 0 || port > 65_535) {
-    throw new Error("Port must be a whole number between 1 and 65535.");
-  }
-  return port;
-}
-
-interface SignupPrereqs {
-  apiUrl: string;
-  preferredPort: number | undefined;
-}
-
-function resolveSignupPrereqs(options?: SignupOptions): SignupPrereqs {
+function resolveApiUrl(options?: SignupOptions): string {
   const apiUrl = getEffectiveApiUrl(options?.apiUrl);
-  const preferredPort = parsePort(options?.port);
   const mode = options?.mode ?? "signup";
   try {
     const existing = resolveApiKey(apiUrl);
@@ -65,37 +46,36 @@ function resolveSignupPrereqs(options?: SignupOptions): SignupPrereqs {
       throw error;
     }
   }
-  return { apiUrl, preferredPort };
+  return apiUrl;
 }
 
 function buildDeviceKeyName(): string | undefined {
   try {
-    const host = os.hostname().trim().replace(/\s+/g, "-").slice(0, 32);
-    if (host) {
-      return `CLI ${host}`.slice(0, 64);
-    }
+    const host = os
+      .hostname()
+      .trim()
+      .replace(NON_PRINTABLE_HOST_CHARACTERS_REGEX, "-")
+      .replace(HOST_WHITESPACE_REGEX, "-")
+      .slice(0, 32);
+    return host ? `CLI ${host}`.slice(0, 64) : undefined;
   } catch {
-    // Ignore error reading hostname
+    return undefined;
   }
-  return undefined;
 }
 
-async function exchangeAndStore(apiUrl: string, code: string, state: string) {
-  const client = new ApiClient({ apiUrl });
-  const data = await client.exchangeDeviceCode(
-    code,
-    state,
-    buildDeviceKeyName()
-  );
-  const rawKey = data.key;
+function storeAuthorization(
+  apiUrl: string,
+  authorization: DeviceTokenResponse
+): string {
+  const rawKey = authorization.access_token;
   storeApiKeyWithRollback(apiUrl, rawKey, () => {
     saveConfig({
       apiUrl,
       keyPrefix: getApiKeyPrefix(rawKey),
-      user: data.user,
+      user: authorization.user,
     });
   });
-  return { data, rawKey };
+  return rawKey;
 }
 
 function printSignupSuccess(
@@ -118,189 +98,80 @@ function printSignupSuccess(
   }
 }
 
-interface EnterPrompt {
-  cancel: () => void;
-  wait: Promise<void>;
-}
-
-function createEnterPrompt(): EnterPrompt {
-  if (!process.stdin.isTTY) {
-    return { cancel: () => undefined, wait: Promise.resolve() };
-  }
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  let cancel!: () => void;
-  const wait = new Promise<void>((resolve) => {
-    cancel = () => {
-      rl.close();
-      resolve();
-    };
-    rl.question("", () => {
-      rl.close();
-      resolve();
-    });
-  });
-  return { cancel, wait };
-}
-
-function printAuthorizeUrls(
+function printAuthorizationInstructions(
   mode: "signup" | "login",
-  authorizeUrl: string,
+  authorization: DeviceAuthorizationResponse,
   noBrowser: boolean
 ): void {
   console.log();
   console.log(`${pc.bold(mode === "login" ? "Logging in" : "Signing up")}...`);
   console.log();
-  console.log(`  ${pc.cyan(authorizeUrl)}`);
+  printFields([
+    ["Open", pc.cyan(authorization.verification_uri)],
+    ["Code", pc.bold(authorization.user_code)],
+  ]);
   console.log();
   if (noBrowser) {
-    console.log(pc.dim("Open the URL above to continue."));
+    console.log(pc.dim("Open the URL and enter the code to continue."));
   } else {
-    console.log("Press Enter to open the browser, or open the URL manually.");
+    console.log(pc.dim("Opening your browser for approval..."));
   }
   console.log();
 }
 
-async function awaitBrowserCode(
-  server: Awaited<ReturnType<typeof startLoopbackServer>>,
-  expectedState: string
-): Promise<{ code: string; state: string }> {
-  const result = await server.waitForCallback();
-  if (result.state !== expectedState) {
-    throw new Error("State mismatch. Run the command again.");
-  }
-  return result;
-}
-
-// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: interactive auth flow
 export async function signupCommand(options?: SignupOptions): Promise<void> {
   const mode = options?.mode ?? "signup";
-
-  let prereqs: SignupPrereqs;
+  let apiUrl: string;
   try {
-    prereqs = resolveSignupPrereqs(options);
+    apiUrl = resolveApiUrl(options);
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.startsWith("Already logged in")
-    ) {
-      printError(error.message);
-    } else {
-      printError(
-        error instanceof Error ? error.message : "Invalid signup options."
-      );
-    }
+    printError(
+      error instanceof Error ? error.message : "Invalid signup options."
+    );
     process.exitCode = 1;
     return;
   }
-  const { apiUrl, preferredPort } = prereqs;
-  const state = generateDeviceState();
-  const timeoutMs = options?.timeoutMs ?? DEVICE_FLOW_TIMEOUT_MS;
 
-  let server: Awaited<ReturnType<typeof startLoopbackServer>>;
+  const client = new ApiClient({ apiUrl });
+  let authorization: DeviceAuthorizationResponse;
   try {
-    server = await startLoopbackServer(state, {
-      port: preferredPort,
-      timeoutMs,
-    });
+    authorization = await client.requestDeviceAuthorization(
+      buildDeviceKeyName()
+    );
   } catch (error) {
     printError(
       error instanceof Error
         ? error.message
-        : "Could not start local callback server."
+        : "Could not start browser authorization."
     );
     process.exitCode = 1;
     return;
   }
 
-  const authorizeUrl = buildAuthorizeUrl(apiUrl, server.port, state, mode);
   const noBrowser = options?.noBrowser ?? false;
-  printAuthorizeUrls(mode, authorizeUrl, noBrowser);
-
-  const callbackPending = awaitBrowserCode(server, state);
-
-  let code: string;
-  let returnedState: string;
-  if (noBrowser) {
-    const waitSpinner = createSpinner("Waiting for browser sign-in...").start();
-    try {
-      ({ code, state: returnedState } = await callbackPending);
-      server.close();
-    } catch (error) {
-      server.close();
-      waitSpinner.fail(
-        error instanceof Error ? error.message : "Browser sign-in failed"
-      );
-      process.exitCode = 1;
-      return;
-    }
-    waitSpinner.stop();
-  } else {
-    const prompt = createEnterPrompt();
-    let first:
-      | (Awaited<typeof callbackPending> & { kind: "callback" })
-      | {
-          kind: "enter";
-        };
-    try {
-      first = await Promise.race([
-        prompt.wait.then(() => ({ kind: "enter" as const })),
-        callbackPending.then((callback) => ({
-          ...callback,
-          kind: "callback" as const,
-        })),
-      ]);
-    } catch (error) {
-      server.close();
-      printError(
-        error instanceof Error ? error.message : "Browser sign-in failed"
-      );
-      process.exitCode = 1;
-      return;
-    } finally {
-      prompt.cancel();
-    }
-    if (first.kind === "callback") {
-      ({ code, state: returnedState } = first);
-      server.close();
-    } else {
-      openBrowser(authorizeUrl);
-      const waitSpinner = createSpinner(
-        "Waiting for browser sign-in..."
-      ).start();
-      try {
-        ({ code, state: returnedState } = await callbackPending);
-        server.close();
-      } catch (error) {
-        server.close();
-        waitSpinner.fail(
-          error instanceof Error ? error.message : "Browser sign-in failed"
-        );
-        process.exitCode = 1;
-        return;
-      }
-      waitSpinner.stop();
-    }
+  printAuthorizationInstructions(mode, authorization, noBrowser);
+  if (!noBrowser) {
+    openBrowser(authorization.verification_uri_complete);
   }
-  const exchangeSpinner = createSpinner("Creating API key...").start();
+
+  const spinner = createSpinner("Waiting for browser approval...").start();
   try {
-    const { data, rawKey } = await exchangeAndStore(
-      apiUrl,
-      code,
-      returnedState
-    );
+    const token = await pollForDeviceToken({
+      expiresInSeconds: authorization.expires_in,
+      intervalSeconds: authorization.interval,
+      requestToken: () => client.requestDeviceToken(authorization.device_code),
+    });
+    const rawKey = storeAuthorization(apiUrl, token);
     if (mode === "login") {
-      exchangeSpinner.succeed(`✓ Logged in as ${data.user.name}`);
+      spinner.succeed(`✓ Logged in as ${token.user.name}`);
     } else {
-      exchangeSpinner.succeed("✓ Account created");
-      console.log(`Signed in as ${data.user.name}`);
+      spinner.succeed("✓ Account created");
+      console.log(`Signed in as ${token.user.name}`);
     }
-    printSignupSuccess(apiUrl, data.user, rawKey);
+    printSignupSuccess(apiUrl, token.user, rawKey);
   } catch (error) {
-    exchangeSpinner.fail(
-      error instanceof Error ? error.message : "Failed to create API key"
+    spinner.fail(
+      error instanceof Error ? error.message : "Browser authorization failed"
     );
     process.exitCode = 1;
   }

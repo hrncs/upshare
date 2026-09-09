@@ -1,84 +1,138 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { RetryableApiError } from "./api-client";
+import { pollForDeviceToken } from "./device-flow";
 import {
-  buildAuthorizeUrl,
-  generateDeviceState,
-  startLoopbackServer,
-} from "./device-flow";
-import { deviceExchangeResponseSchema } from "./schemas";
+  type DeviceTokenResponse,
+  deviceAuthorizationResponseSchema,
+  deviceTokenResponseSchema,
+} from "./schemas";
 
-const HEX_64_REGEX = /^[a-f0-9]{64}$/;
+const token: DeviceTokenResponse = {
+  access_token: `upshare_live_${"x".repeat(32)}`,
+  api_key: {
+    createdAt: new Date().toISOString(),
+    id: "key_1",
+    keyPrefix: "upshare_live_...xxxx",
+    name: "UpShare CLI",
+  },
+  token_type: "Bearer",
+  user: { email: "a@b.com", id: "u_1", name: "Test" },
+};
 
-describe("device-flow", () => {
-  it("generates a 64-char hex state", () => {
-    const state = generateDeviceState();
-    expect(state).toMatch(HEX_64_REGEX);
-    expect(generateDeviceState()).not.toBe(state);
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("pollForDeviceToken", () => {
+  it("waits for the advertised interval and continues while pending", async () => {
+    vi.useFakeTimers();
+    const requestToken = vi
+      .fn()
+      .mockResolvedValueOnce({
+        error: { error: "authorization_pending" },
+        status: "error",
+      })
+      .mockResolvedValueOnce({ data: token, status: "success" });
+    const pending = pollForDeviceToken({
+      expiresInSeconds: 30,
+      intervalSeconds: 5,
+      requestToken,
+    });
+
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(requestToken).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(requestToken).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await expect(pending).resolves.toEqual(token);
+    expect(requestToken).toHaveBeenCalledTimes(2);
   });
 
-  it("receives the browser callback on loopback", async () => {
-    const state = generateDeviceState();
-    const server = await startLoopbackServer(state, { timeoutMs: 5000 });
-    const pending = server.waitForCallback();
-    const res = await fetch(
-      `http://127.0.0.1:${server.port}/callback?code=code123&state=${state}`
-    );
-    await res.body?.cancel();
-    await expect(pending).resolves.toEqual({ code: "code123", state });
-    server.close();
+  it("adds five seconds after a slow_down response", async () => {
+    vi.useFakeTimers();
+    const requestToken = vi
+      .fn()
+      .mockResolvedValueOnce({
+        error: { error: "slow_down" },
+        status: "error",
+      })
+      .mockResolvedValueOnce({ data: token, status: "success" });
+    const pending = pollForDeviceToken({
+      expiresInSeconds: 30,
+      intervalSeconds: 5,
+      requestToken,
+    });
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(requestToken).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(pending).resolves.toEqual(token);
   });
 
-  it("rejects callbacks with the wrong state", async () => {
-    const state = generateDeviceState();
-    const server = await startLoopbackServer(state, { timeoutMs: 5000 });
-    const pending = server.waitForCallback();
-    const res = await fetch(
-      `http://127.0.0.1:${server.port}/callback?code=code123&state=${"b".repeat(64)}`
-    );
-    expect(res.status).toBe(400);
-    await res.body?.cancel();
-    await expect(pending).rejects.toThrow("State mismatch");
-    server.close();
+  it("backs off after connection failures", async () => {
+    vi.useFakeTimers();
+    const requestToken = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new RetryableApiError("timed out", {
+          cause: new Error("timeout"),
+        })
+      )
+      .mockResolvedValueOnce({ data: token, status: "success" });
+    const pending = pollForDeviceToken({
+      expiresInSeconds: 30,
+      intervalSeconds: 5,
+      requestToken,
+    });
+
+    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(pending).resolves.toEqual(token);
   });
 
-  it("builds the authorize URL with port, state, and mode", () => {
-    const url = buildAuthorizeUrl(
-      "https://upshare.app",
-      1234,
-      "a".repeat(64),
-      "signup"
-    );
-    expect(url).toBe(
-      `https://upshare.app/cli/authorize?mode=signup&port=1234&state=${"a".repeat(64)}`
-    );
+  it("stops when authorization expires", async () => {
+    vi.useFakeTimers();
+    const requestToken = vi.fn();
+    const pending = pollForDeviceToken({
+      expiresInSeconds: 5,
+      intervalSeconds: 5,
+      requestToken,
+    });
+    const rejection = expect(pending).rejects.toThrow("Authorization expired");
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await rejection;
+    expect(requestToken).not.toHaveBeenCalled();
   });
 });
 
-describe("deviceExchangeResponseSchema", () => {
-  it("accepts a valid exchange payload", () => {
-    const parsed = deviceExchangeResponseSchema.safeParse({
-      apiKey: {
-        createdAt: new Date().toISOString(),
-        id: "key_1",
-        keyPrefix: "upshare_live_...abcd",
-        name: "Default CLI Key",
-      },
-      key: `upshare_live_${"x".repeat(32)}`,
-      user: { email: "a@b.com", id: "u_1", name: "Test" },
+describe("device authorization response schemas", () => {
+  it("accepts standards-shaped authorization and token responses", () => {
+    const authorization = deviceAuthorizationResponseSchema.safeParse({
+      device_code: "a".repeat(43),
+      expires_in: 600,
+      interval: 5,
+      user_code: "ABCD-EFGH-JKMN-PQRS",
+      verification_uri: "https://upshare.app/cli/authorize",
+      verification_uri_complete:
+        "https://upshare.app/cli/authorize?user_code=ABCD-EFGH-JKMN-PQRS",
     });
-    expect(parsed.success).toBe(true);
+
+    expect(authorization.success).toBe(true);
+    expect(deviceTokenResponseSchema.safeParse(token).success).toBe(true);
   });
 
-  it("rejects a key with the wrong prefix", () => {
-    const parsed = deviceExchangeResponseSchema.safeParse({
-      apiKey: {
-        createdAt: new Date().toISOString(),
-        id: "key_1",
-        keyPrefix: "bad",
-        name: "Default CLI Key",
-      },
-      key: "sk_wrong",
-      user: { email: "a@b.com", id: "u_1", name: "Test" },
+  it("rejects malformed token responses", () => {
+    const parsed = deviceTokenResponseSchema.safeParse({
+      ...token,
+      access_token: "wrong_prefix",
     });
+
     expect(parsed.success).toBe(false);
   });
 });

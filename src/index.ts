@@ -129,13 +129,11 @@ program
     "Log in via browser (dashboard session, creates API key)"
   )
   .option("--no-browser", "Print the URL instead of opening a browser")
-  .option("--port <port>", "Preferred local callback port (default: random)")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .action(
     async (cmdOptions: {
       apiUrl?: string;
       browser?: boolean;
-      port?: string;
       web?: boolean;
     }) => {
       const options = program.opts();
@@ -145,14 +143,11 @@ program
           apiUrl,
           mode: "login",
           noBrowser: cmdOptions.browser === false,
-          port: cmdOptions.port
-            ? Number.parseInt(cmdOptions.port, 10)
-            : undefined,
         });
         return;
       }
-      if (cmdOptions.browser === false || cmdOptions.port !== undefined) {
-        printError("--no-browser and --port require --web.");
+      if (cmdOptions.browser === false) {
+        printError("--no-browser requires --web.");
         process.exitCode = 1;
         return;
       }
@@ -164,26 +159,16 @@ program
   .command("signup")
   .description("Create an account via browser and save the API key")
   .option("--api-url <url>", "Override UpShare backend API URL")
-  .option("--port <port>", "Preferred local callback port (default: random)")
   .option("--no-browser", "Print the URL instead of opening a browser")
-  .action(
-    async (cmdOptions: {
-      apiUrl?: string;
-      browser?: boolean;
-      port?: string;
-    }) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      await signupCommand({
-        apiUrl,
-        mode: "signup",
-        noBrowser: cmdOptions.browser === false,
-        port: cmdOptions.port
-          ? Number.parseInt(cmdOptions.port, 10)
-          : undefined,
-      });
-    }
-  );
+  .action(async (cmdOptions: { apiUrl?: string; browser?: boolean }) => {
+    const options = program.opts();
+    const apiUrl = cmdOptions.apiUrl || options.apiUrl;
+    await signupCommand({
+      apiUrl,
+      mode: "signup",
+      noBrowser: cmdOptions.browser === false,
+    });
+  });
 
 program
   .command("whoami")

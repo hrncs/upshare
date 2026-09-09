@@ -265,7 +265,7 @@ export class ApiClient {
       };
     }
 
-    if (response.status >= 500) {
+    if (response.status === 429 || response.status >= 500) {
       const serverError = await responseError(
         response,
         `Device authorization temporarily failed (${response.status}).`

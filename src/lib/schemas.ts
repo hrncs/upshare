@@ -214,6 +214,7 @@ export const deviceTokenErrorResponseSchema = z.strictObject({
     "authorization_pending",
     "expired_token",
     "invalid_client",
+    "invalid_grant",
     "invalid_request",
     "slow_down",
     "unsupported_grant_type",

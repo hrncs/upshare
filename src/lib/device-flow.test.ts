@@ -109,6 +109,31 @@ describe("pollForDeviceToken", () => {
     await rejection;
     expect(requestToken).not.toHaveBeenCalled();
   });
+
+  it("stops polling when the device grant is invalid or already used", async () => {
+    vi.useFakeTimers();
+    const requestToken = vi.fn().mockResolvedValue({
+      error: {
+        error: "invalid_grant",
+        error_description:
+          "The device authorization is invalid or already used.",
+      },
+      status: "error",
+    });
+    const pending = pollForDeviceToken({
+      expiresInSeconds: 30,
+      intervalSeconds: 5,
+      requestToken,
+    });
+    const rejection = expect(pending).rejects.toThrow(
+      "The device authorization is invalid or already used."
+    );
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    await rejection;
+    expect(requestToken).toHaveBeenCalledOnce();
+  });
 });
 
 describe("device authorization response schemas", () => {

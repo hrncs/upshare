@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.0.19] - 2026-09-22
 
 ### Changed
 - Replaced loopback browser callbacks with the OAuth 2.0 Device Authorization Grant. Browser approvals now use expiring, one-time server-side authorization records and the CLI polls the token endpoint using RFC 8628 semantics.

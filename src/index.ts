@@ -36,6 +36,7 @@ import {
   checkForUpdate,
   printUpdateBanner,
   printVersionWithUpdateCheck,
+  shouldSkipUpdateCheck,
 } from "./lib/update-check";
 
 const CURRENT_VERSION = packageJson.version;
@@ -65,6 +66,7 @@ program
     "Override UpShare backend API URL (default: https://upshare.app)"
   )
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .exitOverride()
   .configureHelp({
     formatHelp(cmd, helper) {
@@ -114,6 +116,7 @@ program
           "Override UpShare backend API URL (default: https://upshare.app)",
         ],
         ["-p, --profile <name>", "Use a specific configuration profile"],
+        ["--no-update-check", "Skip the background update check"],
         ["-h, --help", "Display help for upshare"],
       ];
 
@@ -517,8 +520,9 @@ program
   .command("upgrade")
   .alias("update")
   .description("Upgrade UpShare CLI to the latest version")
-  .action(async () => {
-    upgradedThisRun = await upgradeCommand();
+  .option("--beta", "Upgrade to the latest beta version")
+  .action(async (cmdOptions: { beta?: boolean }) => {
+    upgradedThisRun = await upgradeCommand({ beta: cmdOptions.beta });
   });
 
 program
@@ -652,17 +656,21 @@ function persistGlobalApiUrl(rawUrl: string): void {
 }
 
 async function run() {
-  if (
-    process.argv.slice(2).some((arg) => arg === "-v" || arg === "--version")
-  ) {
-    await printVersionWithUpdateCheck(CURRENT_VERSION);
+  // Strip our flag before commander sees it so it works in any position
+  // (e.g. `upshare upload --no-update-check`, not just before the command).
+  const rawArgv = process.argv;
+  const argv = rawArgv.filter((arg) => arg !== "--no-update-check");
+  if (argv.slice(2).some((arg) => arg === "-v" || arg === "--version")) {
+    printVersionWithUpdateCheck(CURRENT_VERSION);
     return;
   }
 
-  const updatePromise = checkForUpdate(CURRENT_VERSION);
+  const updatePromise = shouldSkipUpdateCheck(rawArgv)
+    ? Promise.resolve(null)
+    : checkForUpdate(CURRENT_VERSION);
 
   try {
-    await program.parseAsync(process.argv);
+    await program.parseAsync(argv);
   } catch (err) {
     const isCommanderExit =
       err instanceof CommanderError &&

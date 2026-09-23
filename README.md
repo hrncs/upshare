@@ -26,7 +26,12 @@ npm install -g upshare
 ```bash
 # Upgrade to the latest version (upgrade, update)
 upshare upgrade
+
+# Upgrade to the latest beta version
+upshare upgrade --beta
 ```
+
+Set `UPSHARE_NO_UPDATE_CHECK=1` (or pass `--no-update-check`) to skip the background update check, e.g. in CI.
 
 ## Commands
 

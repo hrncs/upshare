@@ -670,6 +670,59 @@ describe("upgradeCommand", () => {
     );
   });
 
+  it("upgrades to the beta tag with --beta", async () => {
+    mockRegistry({ version: "0.0.21-beta" });
+    mockedSpawnSync.mockReturnValue({ status: 0 } as never);
+
+    await expect(upgradeCommand({ beta: true })).resolves.toBe(true);
+
+    expect(mockedSpawnSync).toHaveBeenCalledOnce();
+    expect(mockedSpawnSync).toHaveBeenCalledWith(
+      "npm",
+      ["install", "-g", "upshare@beta"],
+      expect.objectContaining({ stdio: "inherit" })
+    );
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
+      "Upgraded to 0.0.21-beta"
+    );
+  });
+
+  it("reports when no beta is published", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: false,
+      status: 404,
+    } as Response);
+
+    await expect(upgradeCommand({ beta: true })).resolves.toBe(false);
+
+    expect(mockedSpawnSync).not.toHaveBeenCalled();
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
+      "No beta version published"
+    );
+  });
+
+  it("reports connection errors instead of no-beta when offline", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+
+    await expect(upgradeCommand({ beta: true })).resolves.toBe(false);
+
+    expect(mockedSpawnSync).not.toHaveBeenCalled();
+    const errors = vi.mocked(console.error).mock.calls.flat().join("\n");
+    expect(errors).toContain("Couldn't reach the update registry");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("does not downgrade when already past the beta", async () => {
+    mockRegistry({ version: "0.0.12-beta" });
+
+    await expect(upgradeCommand({ beta: true })).resolves.toBe(false);
+
+    expect(mockedSpawnSync).not.toHaveBeenCalled();
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
+      "already past the beta"
+    );
+  });
+
   it("fails gracefully when the registry is unreachable", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
 

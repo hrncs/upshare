@@ -42,18 +42,18 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@napi-rs/keyring": "2.0.0",
+    "@napi-rs/keyring": "2.1.0",
     "commander": "^13.1.0",
     "ora": "^8.2.0",
     "picocolors": "^1.1.1",
     "zod": "^4.5.4"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.12",
+    "@biomejs/biome": "2.5.14",
     "@types/node": "^24.0.0",
     "tsdown": "^0.23.0",
     "typescript": "^5.8.0",
-    "ultracite": "7.10.8",
+    "ultracite": "7.12.0",
     "vitest": "4.1.11"
   },
   "packageManager": "pnpm@10.32.0",

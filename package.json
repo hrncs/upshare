@@ -50,7 +50,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.6.1",
     "tsdown": "^0.23.0",
     "typescript": "^5.8.0",
     "ultracite": "7.12.0",

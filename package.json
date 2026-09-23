@@ -54,7 +54,7 @@
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
     "ultracite": "7.12.0",
-    "vitest": "4.1.11"
+    "vitest": "5.0.1"
   },
   "packageManager": "pnpm@10.32.0",
   "engines": {

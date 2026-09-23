@@ -2,26 +2,56 @@ name: Release & Publish
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths:
+      - 'package.json'
   workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  id-token: write
+permissions: {}
 
 jobs:
-  release:
+  check:
+    name: Check version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version_changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+
+      - name: Check version against npm
+        id: version
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          REMOTE_VERSION=$(npm view upshare version 2>/dev/null || echo "0.0.0")
+          echo "local=$LOCAL_VERSION remote=$REMOTE_VERSION"
+          if [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$LOCAL_VERSION" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish to npm & GitHub
+    runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.version_changed == 'true'
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -47,10 +77,69 @@ jobs:
       - name: Publish to npm
         run: pnpm publish --provenance --no-git-checks --access public
 
-      - name: Create GitHub Release
+      - name: Build release notes
+        id: notes
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes
+          MSG=$(git log -1 --format=%s)
+          HIGHLIGHT=$(printf '%s' "$MSG" | sed -n 's/^release: v[^:]*: //p')
+          TITLE="upshare v${VERSION}"
+          if [ -n "$HIGHLIGHT" ]; then
+            TITLE="${TITLE}: ${HIGHLIGHT}"
+          fi
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+          SECTION=$(awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" {flag=1; next}
+            /^## \\[/ && flag {exit}
+            flag' CHANGELOG.md)
+          GENERATED=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="v${VERSION}" -f target_commitish=main --jq .body)
+          {
+            echo "## upshare v${VERSION}"
+            echo ""
+            if [ -n "$SECTION" ]; then
+              printf '%s\n\n' "$SECTION"
+            fi
+            printf '%s\n' "$GENERATED"
+          } > RELEASE_BODY.md
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${VERSION}" \
+            --title "${{ steps.notes.outputs.title }}" \
+            --notes-file RELEASE_BODY.md \
+            --draft \
+            --target "$GITHUB_SHA"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "v${VERSION}" --draft=false
+
+  notify:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [check, release]
+    if: always() && needs.check.outputs.version_changed == 'true'
+    steps:
+      - name: Send Discord notification
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "No DISCORD_WEBHOOK_URL secret, skipping notification."
+            exit 0
+          fi
+          if [ "$RELEASE_RESULT" = "success" ]; then
+            TEXT="upshare v${VERSION} published: https://github.com/${{ github.repository }}/releases/tag/v${VERSION}"
+          else
+            TEXT="upshare v${VERSION} release ${RELEASE_RESULT}: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          curl -sf -H "Content-Type: application/json" \
+            -d "$(jq -n --arg content "$TEXT" '{content: $content}')" \
+            "$DISCORD_WEBHOOK_URL"

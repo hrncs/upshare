@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.20] - 2026-09-24
+
+### Added
+- **Beta upgrades**: Added `upshare upgrade --beta` to install the latest beta release. Plain `upshare upgrade` and the background update check stay on stable releases only.
+- **Update check opt-out**: Added `--no-update-check` flag and `UPSHARE_NO_UPDATE_CHECK=1` to skip the background update check. Checks are also skipped automatically in CI and piped output.
+
+### Changed
+- Version comparison is now prerelease-aware, so prereleases are never offered to stable users while beta users still get newer betas and stables.
+- `upshare --version` no longer hits the network and uses the cached check instead, making it instant and offline-safe.
+- Background update checks now time out after 800ms instead of 1200ms.
+- Dependency updates: commander 15, ora 9, zod 4.6, keyring 2.1, typescript 7, vitest 5, @types/node 26, biome 2.5.14.
+
 ## [0.0.19] - 2026-09-22
 
 ### Changed

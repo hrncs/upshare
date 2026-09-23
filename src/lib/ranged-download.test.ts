@@ -62,6 +62,7 @@ function preparePartialFile(state: DownloadState): {
 
 function createRangeResponse(contents: Buffer, range: string): Response {
   const match = RANGE_HEADER_REGEX.exec(range);
+  // biome-ignore lint/suspicious/noUnnecessaryConditions: test helper handles malformed Range
   if (!match) {
     return new Response(null, { status: 400 });
   }
@@ -103,6 +104,7 @@ describe("ranged downloads", () => {
         const range = new Headers(init?.headers).get("Range") ?? "";
         requestedRanges.push(range);
         const match = RANGE_HEADER_REGEX.exec(range);
+        // biome-ignore lint/suspicious/noUnnecessaryConditions: test helper handles malformed Range
         if (!match) {
           return Promise.resolve(new Response(null, { status: 400 }));
         }

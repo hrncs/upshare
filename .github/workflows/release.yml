@@ -74,35 +74,16 @@ jobs:
           pnpm test
           pnpm build
 
-      - name: Publish to npm
-        run: pnpm publish --provenance --no-git-checks --access public
-
       - name: Build release notes
         id: notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          MSG=$(git log -1 --format=%s)
-          HIGHLIGHT=$(printf '%s' "$MSG" | sed -n 's/^release: v[^:]*: //p')
-          TITLE="upshare v${VERSION}"
-          if [ -n "$HIGHLIGHT" ]; then
-            TITLE="${TITLE}: ${HIGHLIGHT}"
-          fi
+          TITLE=$(bash .github/scripts/build-release-notes.sh "$VERSION" RELEASE_BODY.md)
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
-          SECTION=$(awk -v v="$VERSION" '
-            $0 ~ "^## \\[" v "\\]" {flag=1; next}
-            /^## \\[/ && flag {exit}
-            flag' CHANGELOG.md)
-          GENERATED=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
-            -f tag_name="v${VERSION}" -f target_commitish=main --jq .body)
-          {
-            echo "## upshare v${VERSION}"
-            echo ""
-            if [ -n "$SECTION" ]; then
-              printf '%s\n\n' "$SECTION"
-            fi
-            printf '%s\n' "$GENERATED"
-          } > RELEASE_BODY.md
+
+      - name: Publish to npm
+        run: pnpm publish --provenance --no-git-checks --access public
 
       - name: Create draft release
         env:

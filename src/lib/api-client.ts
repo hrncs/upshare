@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { resolveCommandContext } from "./config";
 import { resolveProfileApiKey } from "./credentials";
-import { cleanIdentifier, sanitizeTerminalText } from "./format";
+import { sanitizeTerminalText } from "./format";
+import { cleanIdentifier, isFileId } from "./identifiers";
 import type {
   CompletedUploadPart,
   CompleteUploadResponse,
@@ -33,6 +34,7 @@ import {
   healthResponseSchema,
   listApiKeysResponseSchema,
   listFilesResponseSchema,
+  MAX_PAGE_SIZE,
   multipartResumeResponseSchema,
   renameApiKeyResponseSchema,
   renameFileResponseSchema,
@@ -42,6 +44,7 @@ import {
   uploadRequestResponseSchema,
   whoamiResponseSchema,
 } from "./schemas";
+import { wait } from "./wait";
 
 export interface CompleteUploadOptions {
   createShareLink?: boolean;
@@ -53,14 +56,87 @@ const API_TIMEOUT_MS = 15_000;
 const HEALTH_TIMEOUT_MS = 8000;
 const FINALIZE_TIMEOUT_MS = 10 * 60 * 1000;
 const FINALIZE_RETRY_DELAY_MS = 1000;
+const COMPLETE_UPLOAD_MAX_ATTEMPTS = 3;
+const COMPLETE_UPLOAD_RETRY_AFTER_CAP_MS = 30_000;
 
-function waitBeforeFinalizeRetry(attempt: number): Promise<void> {
-  const delay = FINALIZE_RETRY_DELAY_MS * 2 ** (attempt - 1);
-  return new Promise((resolve) => setTimeout(resolve, delay));
+function finalizeRetryDelay(attempt: number): Promise<void> {
+  return wait(FINALIZE_RETRY_DELAY_MS * 2 ** (attempt - 1));
 }
+
+function isFinalUploadStateError(bodyText: string): boolean {
+  return (
+    bodyText.includes("cannot be finalized") ||
+    bodyText.includes("invalid_state") ||
+    bodyText.includes("current state")
+  );
+}
+
+function finalizeRetryAfterMs(
+  retryAfterHeader: string | null,
+  attempt: number
+): number {
+  if (retryAfterHeader) {
+    const seconds = Number(retryAfterHeader.trim());
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, COMPLETE_UPLOAD_RETRY_AFTER_CAP_MS);
+    }
+    const dateMs = Date.parse(retryAfterHeader);
+    if (!Number.isNaN(dateMs)) {
+      return Math.min(
+        Math.max(dateMs - Date.now(), 0),
+        COMPLETE_UPLOAD_RETRY_AFTER_CAP_MS
+      );
+    }
+  }
+  return FINALIZE_RETRY_DELAY_MS * 2 ** (attempt - 1);
+}
+
+async function shouldRetryFinalizeConflict(
+  response: Response,
+  attempt: number
+): Promise<boolean> {
+  const peek: unknown = await response
+    .clone()
+    .json()
+    .catch(() => null);
+  const bodyText = JSON.stringify(peek ?? "").toLowerCase();
+  if (isFinalUploadStateError(bodyText)) {
+    return false;
+  }
+  await response.body?.cancel();
+  await wait(
+    finalizeRetryAfterMs(response.headers.get("retry-after"), attempt)
+  );
+  return true;
+}
+
+async function handleFinalizeFailure(
+  response: Response,
+  attempt: number
+): Promise<void> {
+  if (response.status === 409 && attempt < COMPLETE_UPLOAD_MAX_ATTEMPTS) {
+    const shouldRetry = await shouldRetryFinalizeConflict(response, attempt);
+    if (shouldRetry) {
+      return;
+    }
+  }
+  if (response.status >= 500 && attempt < COMPLETE_UPLOAD_MAX_ATTEMPTS) {
+    await response.body?.cancel();
+    await finalizeRetryDelay(attempt);
+    return;
+  }
+  throw await responseError(
+    response,
+    `Failed to finalize upload (${response.status})`
+  );
+}
+
 const LEGACY_SINGLE_UPLOAD_LIMIT_BYTES = 5_363_466_240;
+
+const LEGACY_BARE_FILE_ID_REGEX = /^[A-Za-z0-9_-]{21}$/;
 export const FILE_LIST_PAGE_SIZE = 20;
 const apiErrorSchema = z.object({
+  code: z.string().min(1).optional(),
   error: z.string().min(1).optional(),
   error_description: z.string().min(1).optional(),
 });
@@ -100,6 +176,20 @@ async function parseResponse<T>(
   return parsed.data;
 }
 
+function isMultipartUnsupportedError(body: unknown): boolean {
+  if (!body || typeof body !== "object") {
+    return false;
+  }
+  const text = JSON.stringify(body).toLowerCase();
+  return (
+    text.includes("supportsmultipart") ||
+    (text.includes("multipart") &&
+      (text.includes("unsupported") ||
+        text.includes("unknown") ||
+        text.includes("invalid")))
+  );
+}
+
 export class ApiClient {
   private readonly apiUrl: string;
   private readonly apiKey: string;
@@ -137,10 +227,14 @@ export class ApiClient {
     }
   }
 
-  private getHeaders(apiKey = this.apiKey): Record<string, string> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+  private getHeaders(
+    apiKey = this.apiKey,
+    hasBody = false
+  ): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (hasBody) {
+      headers["Content-Type"] = "application/json";
+    }
     if (apiKey) {
       headers.Authorization = `Bearer ${apiKey}`;
     }
@@ -169,27 +263,32 @@ export class ApiClient {
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
-      const timedOut =
+      if (error instanceof RetryableApiError) {
+        throw error;
+      }
+
+      const isTimeout =
         error instanceof Error &&
         (error.name === "AbortError" || error.name === "TimeoutError");
-      throw new RetryableApiError(
-        timedOut
-          ? `Request to ${this.apiUrl} timed out.`
-          : `Could not connect to ${this.apiUrl}.`,
-        { cause: error }
-      );
+      if (isTimeout || error instanceof TypeError) {
+        throw new RetryableApiError(
+          isTimeout
+            ? `Request to ${this.apiUrl} timed out.`
+            : `Could not connect to ${this.apiUrl}.`,
+          { cause: error }
+        );
+      }
+      throw error;
     }
   }
 
   async verifyApiKey(key?: string): Promise<WhoamiResponse> {
-    const activeKey = key || this.apiKey;
-    if (!activeKey) {
-      if (this.credentialError) {
-        throw this.credentialError;
-      }
-      throw new Error(
-        "No API key provided. Run `upshare login` or set UPSHARE_API_KEY."
-      );
+    let activeKey: string;
+    if (key) {
+      activeKey = key;
+    } else {
+      this.ensureAuth();
+      activeKey = this.apiKey;
     }
     const response = await this.fetch("/api/cli/whoami", {
       headers: this.getHeaders(activeKey),
@@ -230,13 +329,37 @@ export class ApiClient {
     const completeVerificationUrl = new URL(
       authorization.verification_uri_complete
     );
-    const hasTrustedVerificationUrls =
-      verificationUrl.origin === apiOrigin &&
-      completeVerificationUrl.origin === apiOrigin &&
-      completeVerificationUrl.pathname === verificationUrl.pathname;
-    if (!hasTrustedVerificationUrls) {
+
+    const isLocalhostUrl = (url: URL): boolean =>
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "::1";
+    const hasTrustedVerificationUrls = [
+      verificationUrl,
+      completeVerificationUrl,
+    ].every(
+      (url) =>
+        (url.protocol === "https:" ||
+          (url.protocol === "http:" && isLocalhostUrl(url))) &&
+        url.pathname.startsWith("/cli/authorize")
+    );
+    const completeCode = completeVerificationUrl.searchParams.get("user_code");
+    if (
+      !hasTrustedVerificationUrls ||
+      completeVerificationUrl.pathname !== verificationUrl.pathname ||
+      (completeCode !== null && completeCode !== authorization.user_code)
+    ) {
       throw new Error(
         "The UpShare API returned an untrusted verification URL."
+      );
+    }
+    if (
+      verificationUrl.origin !== apiOrigin ||
+      completeVerificationUrl.origin !== apiOrigin
+    ) {
+      console.warn(
+        `Warning: verification URL origin (${verificationUrl.origin}) differs from the API origin (${apiOrigin}). Continuing.`
       );
     }
     return authorization;
@@ -287,7 +410,14 @@ export class ApiClient {
       undefined,
       HEALTH_TIMEOUT_MS
     );
-    if (!response.ok && response.status !== 503) {
+    if (response.status === 503) {
+      try {
+        return await parseResponse(response, healthResponseSchema);
+      } catch {
+        return { status: "degraded" };
+      }
+    }
+    if (!response.ok) {
       throw await responseError(
         response,
         `Health check failed (${response.status})`
@@ -305,19 +435,25 @@ export class ApiClient {
     this.ensureAuth();
     let response = await this.fetch("/api/files/upload-request", {
       body: JSON.stringify({ ...params, supportsMultipart: true }),
-      headers: this.getHeaders(),
+      headers: this.getHeaders(this.apiKey, true),
       method: "POST",
     });
     if (
       response.status === 400 &&
       params.fileSize <= LEGACY_SINGLE_UPLOAD_LIMIT_BYTES
     ) {
-      await response.body?.cancel();
-      response = await this.fetch("/api/files/upload-request", {
-        body: JSON.stringify(params),
-        headers: this.getHeaders(),
-        method: "POST",
-      });
+      const peek: unknown = await response
+        .clone()
+        .json()
+        .catch(() => null);
+      if (isMultipartUnsupportedError(peek)) {
+        await response.body?.cancel();
+        response = await this.fetch("/api/files/upload-request", {
+          body: JSON.stringify(params),
+          headers: this.getHeaders(this.apiKey, true),
+          method: "POST",
+        });
+      }
     }
     if (!response.ok) {
       throw await responseError(
@@ -328,54 +464,50 @@ export class ApiClient {
     return parseResponse(response, uploadRequestResponseSchema);
   }
 
-  completeUpload(
+  async completeUpload(
     fileId: string,
     options?: CompleteUploadOptions
   ): Promise<CompleteUploadResponse> {
-    return this.completeUploadAttempt(fileId, options, 1);
-  }
-
-  private async completeUploadAttempt(
-    fileId: string,
-    options: CompleteUploadOptions | undefined,
-    attempt: number
-  ): Promise<CompleteUploadResponse> {
     this.ensureAuth();
-    let response: Response;
-    try {
-      response = await this.fetch(
-        "/api/files/upload-complete",
-        {
-          body: JSON.stringify({
-            createShareLink: options?.createShareLink,
-            fileId,
-            parts: options?.parts,
-            shareDurationHours: options?.shareDurationHours,
-          }),
-          headers: this.getHeaders(),
-          method: "POST",
-        },
-        FINALIZE_TIMEOUT_MS
-      );
-    } catch (error) {
-      if (attempt < 3) {
-        await waitBeforeFinalizeRetry(attempt);
-        return this.completeUploadAttempt(fileId, options, attempt + 1);
+    for (
+      let attempt = 1;
+      attempt <= COMPLETE_UPLOAD_MAX_ATTEMPTS;
+      attempt += 1
+    ) {
+      let response: Response;
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: sequential finalize retries must not run in parallel
+        response = await this.fetch(
+          "/api/files/upload-complete",
+          {
+            body: JSON.stringify({
+              createShareLink: options?.createShareLink,
+              fileId,
+              parts: options?.parts,
+              shareDurationHours: options?.shareDurationHours,
+            }),
+            headers: this.getHeaders(this.apiKey, true),
+            method: "POST",
+          },
+          FINALIZE_TIMEOUT_MS
+        );
+      } catch (error) {
+        if (
+          error instanceof RetryableApiError &&
+          attempt < COMPLETE_UPLOAD_MAX_ATTEMPTS
+        ) {
+          await finalizeRetryDelay(attempt);
+          continue;
+        }
+        throw error;
       }
-      throw error;
-    }
-    if (!response.ok) {
-      if (response.status >= 500 && attempt < 3) {
-        await response.body?.cancel();
-        await waitBeforeFinalizeRetry(attempt);
-        return this.completeUploadAttempt(fileId, options, attempt + 1);
+      if (!response.ok) {
+        await handleFinalizeFailure(response, attempt);
+        continue;
       }
-      throw await responseError(
-        response,
-        `Failed to finalize upload (${response.status})`
-      );
+      return parseResponse(response, completeUploadResponseSchema);
     }
-    return parseResponse(response, completeUploadResponseSchema);
+    throw new Error("Failed to finalize upload.");
   }
 
   async requestUploadPartUrls(
@@ -387,7 +519,7 @@ export class ApiClient {
       `/api/files/${encodeURIComponent(fileId)}/upload-parts`,
       {
         body: JSON.stringify({ partNumbers }),
-        headers: this.getHeaders(),
+        headers: this.getHeaders(this.apiKey, true),
         method: "POST",
       }
     );
@@ -432,37 +564,50 @@ export class ApiClient {
     return parseResponse(response, multipartResumeResponseSchema);
   }
 
-  async listFiles(options?: {
+  private async listFilesInternal(params: {
+    errorMessage: string;
     page?: number;
     pageSize?: number;
+    status?: string;
   }): Promise<ListFilesResponse> {
     this.ensureAuth();
-    const page = options?.page ?? 1;
-    const pageSize = options?.pageSize ?? FILE_LIST_PAGE_SIZE;
+    const page = params.page ?? 1;
+    const pageSize = params.pageSize ?? FILE_LIST_PAGE_SIZE;
     if (!(Number.isSafeInteger(page) && page > 0)) {
       throw new Error("Page must be a positive whole number.");
     }
-    if (!(Number.isSafeInteger(pageSize) && pageSize > 0 && pageSize <= 500)) {
-      throw new Error("Page size must be a whole number between 1 and 500.");
+    if (
+      !(
+        Number.isSafeInteger(pageSize) &&
+        pageSize > 0 &&
+        pageSize <= MAX_PAGE_SIZE
+      )
+    ) {
+      throw new Error(
+        `Page size must be a whole number between 1 and ${MAX_PAGE_SIZE}.`
+      );
     }
     const searchParams = new URLSearchParams({
       limit: String(pageSize),
       page: String(page),
     });
+    if (params.status) {
+      searchParams.set("status", params.status);
+    }
     const response = await this.fetch(`/api/files?${searchParams}`, {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
       throw await responseError(
         response,
-        `Failed to fetch files (${response.status})`
+        `${params.errorMessage} (${response.status})`
       );
     }
     const data = await parseResponse(response, listFilesResponseSchema);
+
     if (
       data.page !== page ||
       data.pageSize !== pageSize ||
-      data.sort !== "newest" ||
       (data.hasMore && data.files.length === 0)
     ) {
       throw new Error("The UpShare API returned mismatched pagination data.");
@@ -470,43 +615,29 @@ export class ApiClient {
     return data;
   }
 
+  // biome-ignore lint/suspicious/useAwait: thin typed wrapper over listFilesInternal keeps call sites stable
+  async listFiles(options?: {
+    page?: number;
+    pageSize?: number;
+  }): Promise<ListFilesResponse> {
+    return this.listFilesInternal({
+      errorMessage: "Failed to fetch files",
+      page: options?.page,
+      pageSize: options?.pageSize,
+    });
+  }
+
+  // biome-ignore lint/suspicious/useAwait: thin typed wrapper over listFilesInternal keeps call sites stable
   async listPendingUploads(options?: {
     page?: number;
     pageSize?: number;
   }): Promise<ListFilesResponse> {
-    this.ensureAuth();
-    const page = options?.page ?? 1;
-    const pageSize = options?.pageSize ?? FILE_LIST_PAGE_SIZE;
-    if (!(Number.isSafeInteger(page) && page > 0)) {
-      throw new Error("Page must be a positive whole number.");
-    }
-    if (!(Number.isSafeInteger(pageSize) && pageSize > 0 && pageSize <= 500)) {
-      throw new Error("Page size must be a whole number between 1 and 500.");
-    }
-    const searchParams = new URLSearchParams({
-      limit: String(pageSize),
-      page: String(page),
+    return this.listFilesInternal({
+      errorMessage: "Failed to fetch unfinished uploads",
+      page: options?.page,
+      pageSize: options?.pageSize,
       status: "uploading",
     });
-    const response = await this.fetch(`/api/files?${searchParams}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      throw await responseError(
-        response,
-        `Failed to fetch unfinished uploads (${response.status})`
-      );
-    }
-    const data = await parseResponse(response, listFilesResponseSchema);
-    if (
-      data.page !== page ||
-      data.pageSize !== pageSize ||
-      data.sort !== "newest" ||
-      (data.hasMore && data.files.length === 0)
-    ) {
-      throw new Error("The UpShare API returned mismatched pagination data.");
-    }
-    return data;
   }
 
   async getFile(target: string): Promise<FileInfoResponse | null> {
@@ -536,7 +667,7 @@ export class ApiClient {
     const id = cleanIdentifier(target);
     const response = await this.fetch(`/api/files/${encodeURIComponent(id)}`, {
       body: JSON.stringify({ fileName }),
-      headers: this.getHeaders(),
+      headers: this.getHeaders(this.apiKey, true),
       method: "PATCH",
     });
     if (!response.ok) {
@@ -579,11 +710,12 @@ export class ApiClient {
   ): Promise<ShareResponse> {
     this.ensureAuth();
     const id = cleanIdentifier(target);
+
     const response = await this.fetch(
       `/api/files/${encodeURIComponent(id)}/share`,
       {
-        body: JSON.stringify({ durationHours, extendMasterFile: true }),
-        headers: this.getHeaders(),
+        body: JSON.stringify({ durationHours }),
+        headers: this.getHeaders(this.apiKey, true),
         method,
       }
     );
@@ -637,7 +769,7 @@ export class ApiClient {
     }
     const response = await this.fetch("/api/cli/keys", {
       body: JSON.stringify({ id: id.trim(), name: name.trim() }),
-      headers: this.getHeaders(),
+      headers: this.getHeaders(this.apiKey, true),
       method: "PATCH",
     });
     if (!response.ok) {
@@ -654,28 +786,54 @@ export class ApiClient {
     if (!identifier) {
       throw new Error("A file identifier or share token is required.");
     }
-    const isShareTarget =
-      target.includes("/s/") ||
-      (identifier.length <= 16 && !identifier.includes("."));
-    const primaryPath = isShareTarget
+
+    const fileIdFirst = isFileId(identifier);
+    const firstQuery = fileIdFirst
+      ? `/api/files/download?fileId=${encodeURIComponent(identifier)}`
+      : `/api/files/download?token=${encodeURIComponent(identifier)}`;
+    const secondQuery = fileIdFirst
       ? `/api/files/download?token=${encodeURIComponent(identifier)}`
       : `/api/files/download?fileId=${encodeURIComponent(identifier)}`;
-    let response = await this.fetch(primaryPath, {
+    let response = await this.fetch(firstQuery, {
       headers: this.getHeaders(),
     });
 
-    if (!(response.ok || !isShareTarget)) {
-      response = await this.fetch(
-        `/api/files/download?fileId=${encodeURIComponent(identifier)}`,
+    if (response.ok) {
+      return parseResponse(response, downloadResponseSchema);
+    }
+    const firstStatus = response.status;
+
+    await response.body?.cancel();
+    response = await this.fetch(secondQuery, {
+      headers: this.getHeaders(),
+    });
+    if (response.ok) {
+      return parseResponse(response, downloadResponseSchema);
+    }
+    const secondStatus = response.status;
+    await response.body?.cancel();
+
+    if (
+      !fileIdFirst &&
+      LEGACY_BARE_FILE_ID_REGEX.test(identifier) &&
+      firstStatus === 404 &&
+      secondStatus === 404
+    ) {
+      const legacyResponse = await this.fetch(
+        `/api/files/download?fileId=${encodeURIComponent(`f_${identifier}`)}`,
         { headers: this.getHeaders() }
       );
+      if (!legacyResponse.ok) {
+        throw await responseError(
+          legacyResponse,
+          `Download resolution failed (${legacyResponse.status})`
+        );
+      }
+      return parseResponse(legacyResponse, downloadResponseSchema);
     }
-    if (!response.ok) {
-      throw await responseError(
-        response,
-        `Download resolution failed (${response.status})`
-      );
-    }
-    return parseResponse(response, downloadResponseSchema);
+    throw await responseError(
+      response,
+      `Download resolution failed (${secondStatus})`
+    );
   }
 }

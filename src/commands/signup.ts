@@ -2,6 +2,7 @@ import os from "node:os";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
 import {
+  DEFAULT_PROFILE,
   resolveCommandContext,
   saveProfile,
   setCurrentProfile,
@@ -13,9 +14,7 @@ import {
   getCredentialStoreName,
   getEnvironmentApiKey,
   getKeyringAccount,
-  maskApiKey,
   nativeCredentialBackend,
-  resolveProfileApiKey,
   storeProfileApiKeyWithRollback,
 } from "../lib/credentials";
 import { openBrowser, pollForDeviceToken } from "../lib/device-flow";
@@ -27,15 +26,34 @@ import type {
 } from "../lib/schemas";
 import { createSpinner } from "../lib/spinner";
 
-const NON_PRINTABLE_HOST_CHARACTERS_REGEX = /[^\x20-\x7e]+/g;
-const HOST_WHITESPACE_REGEX = /\s+/g;
-
 export interface SignupOptions {
   apiUrl?: string;
   backend?: CredentialBackend;
   mode?: "signup" | "login";
   noBrowser?: boolean;
   profile?: string;
+}
+
+function hasStoredKey(
+  profile: string,
+  apiUrl: string,
+  backend: CredentialBackend
+): boolean {
+  const candidates =
+    profile === DEFAULT_PROFILE
+      ? [getKeyringAccount(profile, apiUrl), apiUrl]
+      : [getKeyringAccount(profile, apiUrl)];
+  for (const account of candidates) {
+    try {
+      const stored = backend.get(account);
+      if (stored !== undefined && stored.trim().length > 0) {
+        return true;
+      }
+    } catch {
+      // Intentionally ignored: fall through to the next account candidate.
+    }
+  }
+  return false;
 }
 
 function resolveSignupContext(options?: SignupOptions): {
@@ -48,12 +66,10 @@ function resolveSignupContext(options?: SignupOptions): {
   });
   const backend = options?.backend ?? nativeCredentialBackend;
   const mode = options?.mode ?? "signup";
-  const existing = resolveProfileApiKey(
-    context.profile,
-    context.apiUrl,
-    backend
-  );
-  if (existing && mode === "signup") {
+  if (
+    mode === "signup" &&
+    hasStoredKey(context.profile, context.apiUrl, backend)
+  ) {
     throw new Error(
       "Already logged in. Run `upshare logout` first or `upshare login --web` for an additional browser key."
     );
@@ -66,8 +82,7 @@ function buildDeviceKeyName(): string | undefined {
     const host = os
       .hostname()
       .trim()
-      .replace(NON_PRINTABLE_HOST_CHARACTERS_REGEX, "-")
-      .replace(HOST_WHITESPACE_REGEX, "-")
+      .replace(/[^\x20-\x7e\s]+|\s+/g, "-")
       .slice(0, 32);
     return host ? `CLI ${host}`.slice(0, 64) : undefined;
   } catch {
@@ -82,6 +97,7 @@ function storeAuthorization(
   backend: CredentialBackend = nativeCredentialBackend
 ): string {
   const rawKey = authorization.access_token;
+  const prefix = getApiKeyPrefix(rawKey);
   storeProfileApiKeyWithRollback(
     profile,
     apiUrl,
@@ -89,27 +105,27 @@ function storeAuthorization(
     () => {
       saveProfile(profile, {
         apiUrl,
-        keyPrefix: getApiKeyPrefix(rawKey),
+        keyPrefix: prefix,
         user: authorization.user,
       });
     },
     backend
   );
   setCurrentProfile(profile);
-  return rawKey;
+  return prefix;
 }
 
 function printSignupSuccess(
   profile: string,
   apiUrl: string,
   user: { email: string; name: string },
-  rawKey: string
+  keyPrefix: string
 ): void {
   console.log();
   printFields([
     ["Profile", profile],
     ["Email", user.email],
-    ["API key", pc.gray(sanitizeTerminalText(maskApiKey(rawKey)))],
+    ["API key", pc.gray(sanitizeTerminalText(keyPrefix))],
     ["Credential", getCredentialStoreName()],
     ["API URL", apiUrl],
   ]);
@@ -201,14 +217,13 @@ export async function signupCommand(options?: SignupOptions): Promise<void> {
       intervalSeconds: authorization.interval,
       requestToken: () => client.requestDeviceToken(authorization.device_code),
     });
-    const rawKey = storeAuthorization(profile, apiUrl, token, backend);
+    const keyPrefix = storeAuthorization(profile, apiUrl, token, backend);
     if (mode === "login") {
-      spinner.succeed(`✓ Logged in as ${token.user.name}`);
+      spinner.succeed(`Logged in as ${token.user.name}`);
     } else {
-      spinner.succeed("✓ Account created");
-      console.log(`Signed in as ${token.user.name}`);
+      spinner.succeed(`Account created and signed in as ${token.user.name}`);
     }
-    printSignupSuccess(profile, apiUrl, token.user, rawKey);
+    printSignupSuccess(profile, apiUrl, token.user, keyPrefix);
   } catch (error) {
     spinner.fail(
       error instanceof Error ? error.message : "Browser authorization failed"

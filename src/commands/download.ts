@@ -10,8 +10,17 @@ import {
   openDownloadJournal,
   removeDownloadWorkFiles,
 } from "../lib/download-journal";
-import { formatBytes, formatDuration } from "../lib/format";
-import { printError, printFields, printWarning } from "../lib/output";
+import {
+  formatBytes,
+  formatDuration,
+  sanitizeTerminalText,
+} from "../lib/format";
+import {
+  printError,
+  printFields,
+  printSuccess,
+  printWarning,
+} from "../lib/output";
 import { downloadFileInRanges } from "../lib/ranged-download";
 import type { DownloadResponse } from "../lib/schemas";
 import { createSpinner } from "../lib/spinner";
@@ -64,15 +73,35 @@ export function finalizeDownloadedFile(
   } catch (error) {
     const { code } = error as NodeJS.ErrnoException;
     if (code === "EXDEV" || code === "ENOTSUP" || code === "EPERM") {
-      fs.copyFileSync(partPath, destinationPath);
-      fs.unlinkSync(partPath);
+      try {
+        fs.copyFileSync(partPath, destinationPath);
+        fs.unlinkSync(partPath);
+      } catch (fallbackError) {
+        try {
+          fs.unlinkSync(destinationPath);
+        } catch {
+          // Intentionally ignored: truncated-dest cleanup is best-effort.
+        }
+        throw fallbackError;
+      }
       return;
     }
     throw error;
   }
 }
 
-function createOrLoadDownload(
+function corruptResumeMessage(
+  journalPath: string,
+  partPath: string,
+  detail: string
+): string {
+  return (
+    `${detail} Resume state corrupted (journal without part / part without journal). ` +
+    `Delete ${partPath} ${journalPath} or re-run with --force to restart.`
+  );
+}
+
+function createFreshDownload(
   outputDirectory: string,
   fileInfo: DownloadResponse
 ): {
@@ -82,41 +111,6 @@ function createOrLoadDownload(
   state: NonNullable<ReturnType<typeof loadDownloadState>>;
 } {
   const paths = getDownloadWorkPaths(outputDirectory, fileInfo.fileId);
-  const savedState = loadDownloadState(paths.journalPath);
-  const partExists = fs.existsSync(paths.partPath);
-
-  if (savedState) {
-    if (!partExists) {
-      throw new Error(
-        `Download resume journal exists but its partial file is missing: ${paths.journalPath}`
-      );
-    }
-    if (
-      savedState.fileId !== fileInfo.fileId ||
-      savedState.fileName !== fileInfo.fileName ||
-      savedState.fileSize !== fileInfo.fileSize ||
-      savedState.chunkSize !== DOWNLOAD_CHUNK_SIZE
-    ) {
-      throw new Error(
-        `Download resume journal does not match the remote file: ${paths.journalPath}`
-      );
-    }
-    if (fs.statSync(paths.partPath).size !== fileInfo.fileSize) {
-      throw new Error(`Partial download has the wrong size: ${paths.partPath}`);
-    }
-    return {
-      ...paths,
-      journal: openDownloadJournal(paths.journalPath),
-      state: savedState,
-    };
-  }
-
-  if (partExists) {
-    throw new Error(
-      `Partial download exists without a resume journal: ${paths.partPath}`
-    );
-  }
-
   const state = {
     chunkSize: DOWNLOAD_CHUNK_SIZE,
     completedChunks: [],
@@ -144,6 +138,108 @@ function createOrLoadDownload(
   }
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: resume-state branching across journal/part combinations
+function createOrLoadDownload(
+  outputDirectory: string,
+  fileInfo: DownloadResponse,
+  options?: { force?: boolean }
+): {
+  journal: DownloadJournal;
+  journalPath: string;
+  partPath: string;
+  state: NonNullable<ReturnType<typeof loadDownloadState>>;
+} {
+  const paths = getDownloadWorkPaths(outputDirectory, fileInfo.fileId);
+  const restartFresh = () => {
+    removeDownloadWorkFiles(paths);
+    return createFreshDownload(outputDirectory, fileInfo);
+  };
+  const savedState = loadDownloadState(paths.journalPath);
+  const partExists = fs.existsSync(paths.partPath);
+
+  if (savedState) {
+    if (!partExists) {
+      if (options?.force) {
+        printWarning(
+          "Resume journal found without its partial file; restarting download (--force)."
+        );
+        return restartFresh();
+      }
+      throw new Error(
+        corruptResumeMessage(
+          paths.journalPath,
+          paths.partPath,
+          `Download resume journal exists but its partial file is missing: ${paths.journalPath}.`
+        )
+      );
+    }
+    if (
+      savedState.fileId !== fileInfo.fileId ||
+      savedState.fileName !== fileInfo.fileName ||
+      savedState.fileSize !== fileInfo.fileSize
+    ) {
+      if (options?.force) {
+        printWarning(
+          "Resume journal does not match the remote file; restarting download (--force)."
+        );
+        return restartFresh();
+      }
+      throw new Error(
+        corruptResumeMessage(
+          paths.journalPath,
+          paths.partPath,
+          `Download resume journal does not match the remote file: ${paths.journalPath}.`
+        )
+      );
+    }
+    if (savedState.chunkSize !== DOWNLOAD_CHUNK_SIZE) {
+      printWarning(
+        `Resume journal uses chunk size ${savedState.chunkSize}, expected ${DOWNLOAD_CHUNK_SIZE}; restarting download.`
+      );
+      return restartFresh();
+    }
+    if (fs.statSync(paths.partPath).size !== fileInfo.fileSize) {
+      if (options?.force) {
+        printWarning(
+          "Partial download has the wrong size; restarting download (--force)."
+        );
+        return restartFresh();
+      }
+      throw new Error(
+        corruptResumeMessage(
+          paths.journalPath,
+          paths.partPath,
+          `Partial download has the wrong size: ${paths.partPath}.`
+        )
+      );
+    }
+    return {
+      ...paths,
+      journal: openDownloadJournal(paths.journalPath),
+      state: savedState,
+    };
+  }
+
+  if (partExists) {
+    if (options?.force) {
+      printWarning(
+        "Partial download found without a resume journal; restarting download (--force)."
+      );
+      return restartFresh();
+    }
+    throw new Error(
+      corruptResumeMessage(
+        paths.journalPath,
+        paths.partPath,
+        `Partial download exists without a resume journal: ${paths.partPath}.`
+      )
+    );
+  }
+
+  return createFreshDownload(outputDirectory, fileInfo);
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: command handler with resume, progress, and finalize phases
 export async function downloadCommand(
   target: string,
   options?: DownloadCommandOptions
@@ -179,6 +275,7 @@ export async function downloadCommand(
     profile: options?.profile,
   });
   const spinner = createSpinner(`Resolving ${pc.bold(target)}...`).start();
+  let spinnerActive = true;
   let workPaths: ReturnType<typeof getDownloadWorkPaths> | undefined;
   let journal: DownloadJournal | undefined;
   let transferProgress: TransferProgressLine | undefined;
@@ -190,7 +287,16 @@ export async function downloadCommand(
 
     const destinationPath = path.resolve(outputDirectory, fileInfo.fileName);
     if (path.dirname(destinationPath) !== outputDirectory) {
-      throw new Error("The server returned an unsafe file name.");
+      const displayName = sanitizeTerminalText(fileInfo.fileName);
+      const looksNested =
+        displayName.includes("/") ||
+        displayName.includes("\\") ||
+        displayName.includes("..");
+      throw new Error(
+        looksNested
+          ? `The server returned a nested file name that would escape the output directory: ${displayName}. Refusing to write outside ${outputDirectory}.`
+          : `The server returned an unsafe file name: ${displayName}. Refusing to write to ${destinationPath}.`
+      );
     }
     if (!options?.force && fs.existsSync(destinationPath)) {
       throw new Error(
@@ -198,11 +304,14 @@ export async function downloadCommand(
       );
     }
 
-    const download = createOrLoadDownload(outputDirectory, fileInfo);
+    const download = createOrLoadDownload(outputDirectory, fileInfo, {
+      force: options?.force,
+    });
     workPaths = download;
     ({ journal } = download);
     let networkBytes = 0;
     spinner.stop();
+    spinnerActive = false;
     transferProgress = createTransferProgressLine({
       action: "Downloading",
       startedAt: Date.now(),
@@ -239,7 +348,7 @@ export async function downloadCommand(
     transferProgress.clear();
     transferProgress = undefined;
 
-    spinner.succeed(`Downloaded ${fileInfo.fileName}`);
+    printSuccess(`Downloaded ${fileInfo.fileName}`);
     const totalSeconds = (Date.now() - commandStartedAt) / 1000;
     const averageSpeed = networkBytes / Math.max(totalSeconds, 0.001);
     console.log();
@@ -257,12 +366,26 @@ export async function downloadCommand(
     console.log();
   } catch (error) {
     transferProgress?.clear();
-    spinner.fail(error instanceof Error ? error.message : "Download failed");
+    transferProgress = undefined;
+    const message = error instanceof Error ? error.message : "Download failed";
+    if (spinnerActive) {
+      spinner.fail(message);
+      spinnerActive = false;
+    } else {
+      printError(message);
+    }
     if (workPaths) {
       printWarning("Run the same command again to resume this download.");
     }
     process.exitCode = 1;
   } finally {
-    journal?.close();
+    if (journal) {
+      try {
+        journal.close();
+      } catch {
+        // Intentionally ignored: cleanup must not mask the download result.
+      }
+      journal = undefined;
+    }
   }
 }

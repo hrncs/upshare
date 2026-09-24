@@ -5,7 +5,11 @@ export interface SuggestableCommand {
 
 const MAX_SUGGESTION_DISTANCE = 3;
 
-export function editDistance(a: string, b: string): number {
+export function editDistance(
+  a: string,
+  b: string,
+  maxDistance = Number.POSITIVE_INFINITY
+): number {
   const x = a.toLowerCase();
   const y = b.toLowerCase();
   const m = x.length;
@@ -16,6 +20,15 @@ export function editDistance(a: string, b: string): number {
   if (n === 0) {
     return m;
   }
+  if (Math.abs(m - n) > maxDistance) {
+    return maxDistance + 1;
+  }
+  if (y.startsWith(x)) {
+    return n - m;
+  }
+  if (x.startsWith(y)) {
+    return m - n;
+  }
 
   let prev = Array.from({ length: n + 1 }, (_, j) => j);
   let curr = new Array<number>(n + 1).fill(0);
@@ -23,6 +36,7 @@ export function editDistance(a: string, b: string): number {
 
   for (let i = 1; i <= m; i += 1) {
     curr[0] = i;
+    let [rowMin] = curr;
     for (let j = 1; j <= n; j += 1) {
       const substitutionCost = x[i - 1] === y[j - 1] ? 0 : 1;
       curr[j] = Math.min(
@@ -33,6 +47,12 @@ export function editDistance(a: string, b: string): number {
       if (i > 1 && j > 1 && x[i - 1] === y[j - 2] && x[i - 2] === y[j - 1]) {
         curr[j] = Math.min(curr[j], prevPrev[j - 2] + 1);
       }
+      if (curr[j] < rowMin) {
+        rowMin = curr[j];
+      }
+    }
+    if (rowMin > maxDistance) {
+      return maxDistance + 1;
     }
     [prevPrev, prev, curr] = [prev, curr, prevPrev];
   }
@@ -52,7 +72,7 @@ export function suggestCommand(
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const { aliases = [], name } of commands) {
     for (const candidate of [name, ...aliases]) {
-      const distance = editDistance(normalized, candidate.toLowerCase());
+      const distance = editDistance(normalized, candidate, bestDistance);
       if (distance < bestDistance) {
         bestDistance = distance;
         best = name;
@@ -63,6 +83,7 @@ export function suggestCommand(
   if (best === null) {
     return null;
   }
+
   const threshold = Math.min(
     MAX_SUGGESTION_DISTANCE,
     Math.max(1, Math.floor(Math.max(normalized.length, best.length) / 3))

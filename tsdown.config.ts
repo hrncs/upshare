@@ -9,6 +9,8 @@ export default defineConfig({
   entry: ["src/index.ts"],
   fixedExtension: false,
   format: ["esm"],
-  minify: true,
-  sourcemap: false,
+  minify: false,
+  platform: "node",
+  sourcemap: true,
+  target: "node20",
 });

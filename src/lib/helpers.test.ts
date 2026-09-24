@@ -2,6 +2,7 @@ import { PassThrough } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanIdentifier, formatBytes, formatDuration } from "./format";
+import { isFileId } from "./identifiers";
 import { printError, printFields, printSuccess, printWarning } from "./output";
 import { createSpinner } from "./spinner";
 import { editDistance, suggestCommand } from "./suggest";
@@ -256,6 +257,19 @@ describe("cleanIdentifier", () => {
   it("leaves clean token or fileId unchanged", () => {
     expect(cleanIdentifier("abcdef12")).toBe("abcdef12");
     expect(cleanIdentifier("fil_01h9x3q8k2v4m1")).toBe("fil_01h9x3q8k2v4m1");
+  });
+});
+
+describe("isFileId", () => {
+  it("detects f_-prefixed file ids", () => {
+    expect(isFileId(`f_${"a".repeat(21)}`)).toBe(true);
+    expect(isFileId("f_abc")).toBe(true);
+  });
+
+  it("rejects bare tokens and legacy bare ids", () => {
+    expect(isFileId("a".repeat(21))).toBe(false);
+    expect(isFileId("abcdef12")).toBe(false);
+    expect(isFileId("")).toBe(false);
   });
 });
 

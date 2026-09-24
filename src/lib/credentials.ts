@@ -1,14 +1,47 @@
 import { createRequire } from "node:module";
 import type { Entry as KeyringEntry } from "@napi-rs/keyring";
-import { z } from "zod";
 import { DEFAULT_PROFILE, normalizeProfileName } from "./config";
 
 const API_KEY_ENVIRONMENT_VARIABLE = "UPSHARE_API_KEY";
 const CREDENTIAL_SERVICE = "UpShare CLI";
 const PROFILE_ACCOUNT_SEPARATOR = "::";
 const AMBIGUOUS_ERROR_PATTERN = /ambiguous/i;
-const apiKeySchema = z.string().trim().min(1);
+
+function parseApiKeyValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 const runtimeRequire = createRequire(import.meta.url);
+
+let cachedKeyringModule:
+  | {
+      Entry?: KeyringConstructor;
+      findCredentials?: FindCredentialsFn;
+    }
+  | undefined;
+let keyringModuleLoaded = false;
+
+function getKeyringModule(): {
+  Entry?: KeyringConstructor;
+  findCredentials?: FindCredentialsFn;
+} {
+  if (!keyringModuleLoaded) {
+    try {
+      cachedKeyringModule = runtimeRequire("@napi-rs/keyring") as {
+        Entry?: KeyringConstructor;
+        findCredentials?: FindCredentialsFn;
+      };
+    } catch {
+      cachedKeyringModule = {};
+    }
+    keyringModuleLoaded = true;
+  }
+  return cachedKeyringModule ?? {};
+}
 
 export interface CredentialBackend {
   delete: (account: string) => boolean;
@@ -38,6 +71,9 @@ let findCredentialsOverride: FindCredentialsFn | undefined;
 export function __setKeyringEntryFactoryForTesting(
   factory: KeyringConstructor | undefined
 ): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Test hook unavailable in production.");
+  }
   keyringEntryOverride = factory === undefined ? undefined : { factory };
 }
 
@@ -45,6 +81,9 @@ export function __setKeyringEntryFactoryForTesting(
 export function __setFindCredentialsForTesting(
   fn: FindCredentialsFn | undefined
 ): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Test hook unavailable in production.");
+  }
   findCredentialsOverride = fn;
 }
 
@@ -85,9 +124,7 @@ function createEntry(apiUrl: string) {
       }
       return new keyringEntryOverride.factory(CREDENTIAL_SERVICE, apiUrl);
     }
-    const keyring = runtimeRequire("@napi-rs/keyring") as {
-      Entry?: KeyringConstructor;
-    };
+    const keyring = getKeyringModule();
     if (!keyring.Entry) {
       throw new Error("The native credential module did not export Entry");
     }
@@ -102,9 +139,7 @@ function listStoredAccounts(): Array<{ account: string; password: string }> {
     if (findCredentialsOverride) {
       return findCredentialsOverride(CREDENTIAL_SERVICE);
     }
-    const keyring = runtimeRequire("@napi-rs/keyring") as {
-      findCredentials?: FindCredentialsFn;
-    };
+    const keyring = getKeyringModule();
     if (!keyring.findCredentials) {
       return [];
     }
@@ -125,11 +160,7 @@ export const nativeCredentialBackend: CredentialBackend = {
   get(apiUrl) {
     try {
       const raw = createEntry(apiUrl).getPassword() ?? undefined;
-      if (raw === undefined) {
-        return;
-      }
-      const parsed = apiKeySchema.safeParse(raw);
-      return parsed.success ? parsed.data : undefined;
+      return parseApiKeyValue(raw);
     } catch (error) {
       throw credentialStoreError("read", error);
     }
@@ -138,8 +169,15 @@ export const nativeCredentialBackend: CredentialBackend = {
     return listStoredAccounts().map((entry) => entry.account);
   },
   set(apiUrl, apiKey) {
+    const parsed = parseApiKeyValue(apiKey);
+    if (!parsed) {
+      throw credentialStoreError(
+        "store",
+        new Error("API key must not be empty.")
+      );
+    }
     try {
-      createEntry(apiUrl).setPassword(apiKeySchema.parse(apiKey));
+      createEntry(apiUrl).setPassword(parsed);
     } catch (error) {
       throw credentialStoreError("store", error);
     }
@@ -183,11 +221,11 @@ export function getEnvironmentApiKey(): string | undefined {
     return undefined;
   }
 
-  const parsed = apiKeySchema.safeParse(value);
-  if (!parsed.success) {
+  const parsed = parseApiKeyValue(value);
+  if (!parsed) {
     throw new Error(`${API_KEY_ENVIRONMENT_VARIABLE} must not be empty.`);
   }
-  return parsed.data;
+  return parsed;
 }
 
 export function getKeyringAccount(profile: string, apiUrl: string): string {
@@ -211,12 +249,14 @@ export function parseKeyringAccount(account: string): {
 function toResolvedCredential(
   storedApiKey: string | undefined
 ): ResolvedCredential | undefined {
-  if (!storedApiKey) {
-    return undefined;
-  }
-  const parsed = apiKeySchema.safeParse(storedApiKey);
-  return parsed.success
-    ? { apiKey: parsed.data, source: "keyring" }
+  const parsed = parseApiKeyValue(storedApiKey);
+  return parsed ? { apiKey: parsed, source: "keyring" } : undefined;
+}
+
+function getEnvironmentCredential(): ResolvedCredential | undefined {
+  const environmentApiKey = getEnvironmentApiKey();
+  return environmentApiKey
+    ? { apiKey: environmentApiKey, source: "environment" }
     : undefined;
 }
 
@@ -224,12 +264,9 @@ export function resolveApiKey(
   apiUrl: string,
   backend: CredentialBackend = nativeCredentialBackend
 ): ResolvedCredential | undefined {
-  const environmentApiKey = getEnvironmentApiKey();
-  if (environmentApiKey) {
-    return { apiKey: environmentApiKey, source: "environment" };
-  }
-
-  return toResolvedCredential(backend.get(apiUrl));
+  return (
+    getEnvironmentCredential() ?? toResolvedCredential(backend.get(apiUrl))
+  );
 }
 
 export function resolveProfileApiKey(
@@ -237,9 +274,9 @@ export function resolveProfileApiKey(
   apiUrl: string,
   backend: CredentialBackend = nativeCredentialBackend
 ): ResolvedCredential | undefined {
-  const environmentApiKey = getEnvironmentApiKey();
-  if (environmentApiKey) {
-    return { apiKey: environmentApiKey, source: "environment" };
+  const environment = getEnvironmentCredential();
+  if (environment) {
+    return environment;
   }
 
   const account = getKeyringAccount(profile, apiUrl);
@@ -254,15 +291,16 @@ export function resolveProfileApiKey(
   if (!legacy) {
     return undefined;
   }
+
   try {
     backend.set(account, legacy.apiKey);
     try {
       backend.delete(apiUrl);
     } catch {
-      // Ignore legacy cleanup failure; the credential remains readable.
+      // Intentionally ignored: legacy-entry cleanup is best-effort.
     }
   } catch {
-    // Ignore migration failure and fall back to the legacy entry.
+    // Intentionally ignored: migration is best-effort; the credential was resolved.
   }
   return legacy;
 }
@@ -277,13 +315,24 @@ export function ensureCredentialStoreAccessible(
 export interface DeleteAllResult {
   deletedApiUrls: string[];
   failed: Array<{ apiUrl: string; error: Error }>;
+  listed: boolean;
 }
 
 export function deleteAllStoredApiKeys(
   backend: CredentialBackend = nativeCredentialBackend
 ): DeleteAllResult {
-  const candidates = backend.list?.() ?? [];
-  const result: DeleteAllResult = { deletedApiUrls: [], failed: [] };
+  if (!backend.list) {
+    console.warn(
+      "Warning: credential backend does not support listing; no credentials were enumerated."
+    );
+    return { deletedApiUrls: [], failed: [], listed: false };
+  }
+  const candidates = backend.list();
+  const result: DeleteAllResult = {
+    deletedApiUrls: [],
+    failed: [],
+    listed: true,
+  };
   for (const candidate of candidates) {
     try {
       if (backend.delete(candidate)) {
@@ -305,13 +354,12 @@ export function storeApiKeyWithRollback(
   commitMetadata: () => void,
   backend: CredentialBackend = nativeCredentialBackend
 ): void {
-  const rawPrevious = backend.get(apiUrl);
-  const parsedPrevious = rawPrevious
-    ? apiKeySchema.safeParse(rawPrevious)
-    : undefined;
-  const previousApiKey =
-    parsedPrevious?.success === true ? parsedPrevious.data : undefined;
-  backend.set(apiUrl, apiKey);
+  const previousApiKey = parseApiKeyValue(backend.get(apiUrl));
+  const parsedNew = parseApiKeyValue(apiKey);
+  if (!parsedNew) {
+    throw new Error("API key must not be empty.");
+  }
+  backend.set(apiUrl, parsedNew);
 
   try {
     commitMetadata();
@@ -347,7 +395,7 @@ export function storeProfileApiKeyWithRollback(
     try {
       backend.delete(apiUrl);
     } catch {
-      // Ignore legacy cleanup failure; the migrated entry is authoritative.
+      // Intentionally ignored: legacy-entry cleanup is best-effort.
     }
   }
 }

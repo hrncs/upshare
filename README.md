@@ -169,7 +169,7 @@ upshare list --pending
 # Create or retrieve a share link (default: 24 hours)
 upshare share <fileId-or-token>
 
-# Create a share link with custom duration in hours (1-168)
+# Create a share link with custom duration in hours (0.5-168)
 upshare share <fileId-or-token> --duration 48
 
 # Extend the duration of an active share link
@@ -221,18 +221,31 @@ upshare manage
 upshare info <fileId-or-token>
 ```
 
+### 12. API Status
+```bash
+# Check UpShare API status
+upshare status
+```
+
 ## Global & Command Options
 
 - `--hours <hours>`: Changes default file retention period in hours (1–168, default: `24`).
-- `--concurrency <count>`: Sets concurrent transfers (1–16). The default is `16` for uploads and `8` for downloads.
+- `--concurrency <count>`: Sets concurrent transfers (1–16 for uploads, 1–16 for downloads). The default is `16` for uploads and `8` for downloads.
 - `--retries <count>`: Sets retries for failed transfers (0–20, default: `5`).
 - `--no-share`: Skip creating a public share link; keeps the file private in your dashboard.
-- `-d, --share-duration <hours>`: Set the share duration when uploading.
-- `-d, --duration <hours>`: Set the duration when creating or extending a share link.
+- `-d, --share-duration <hours>`: Set the share duration when uploading (0.5–168).
+- `-d, --duration <hours>`: Set the duration when creating or extending a share link (0.5–168).
 - `-o, --out <dir>`: Choose the download directory.
-- `-f, --force`: Overwrite existing destination file when downloading.
-- `-y, --yes`: Skip confirmation prompts when aborting unfinished uploads or deleting files.
-- `--api-url <url>`: Override UpShare backend URL (default: `https://upshare.app`).
+- `-f, --force`: Overwrite existing destination file when downloading; restart a corrupted resume state.
+- `-y, --yes`: Skip confirmation prompts when aborting unfinished uploads, deleting files, or removing profiles.
+- `--page <page>`: Page number for `list` (mutually exclusive with `--all`).
+- `--all`: List all files (mutually exclusive with `--page`).
+- `--pending`: List partial uploads holding space (`list --pending`).
+- `--json`: Output `list` results as JSON for scripting.
+- `--beta`: Upgrade to the latest beta (`upgrade --beta`).
+- `-w, --web`: Log in / sign up via browser. `--no-browser` prints the URL instead of opening it.
+- `--no-update-check`: Skip the background update check (or set `UPSHARE_NO_UPDATE_CHECK=1`).
+- `--api-url <url>`: Per-run override of UpShare backend URL (default: `https://upshare.app`). Not persisted; use `profile add <name> --api-url <url>` to persist.
 - `-p, --profile <name>`: Run against a specific profile (or set `UPSHARE_PROFILE`).
 
 >API keys are stored per profile in Windows Credential Manager, macOS

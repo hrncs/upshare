@@ -9,7 +9,7 @@
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/himanshuranjan/upshare.git
+   git clone https://github.com/hrncs/upshare.git
    cd upshare
    ```
 
@@ -40,7 +40,7 @@ pnpm prepublishOnly
 
 ## Pull Request Guidelines
 
-- Create a feature branch from `master` (`git checkout -b feature/your-feature-name`).
+- Create a feature branch from `main` (`git checkout -b feature/your-feature-name`).
 - Keep PRs focused on a single change, fix, or improvement.
 - Ensure all existing and new tests pass.
 - Use clear, conventional commit messages (`feat: ...`, `fix: ...`, `docs: ...`, `chore: ...`).

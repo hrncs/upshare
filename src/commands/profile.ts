@@ -1,9 +1,8 @@
-import readline from "node:readline/promises";
 import pc from "picocolors";
 import {
+  type CliConfig,
   DEFAULT_API_URL,
   getActiveProfileName,
-  listProfileNames,
   loadConfig,
   normalizeProfileName,
   removeProfileFromConfig,
@@ -14,6 +13,7 @@ import {
   type CredentialBackend,
   deleteProfileCredential,
   getEnvironmentApiKey,
+  getKeyringAccount,
   nativeCredentialBackend,
   resolveProfileApiKey,
 } from "../lib/credentials";
@@ -25,17 +25,10 @@ import {
   printSuccess,
   printWarning,
 } from "../lib/output";
+import { confirm } from "../lib/prompt";
 
 export interface ProfileCommandOptions {
   backend?: CredentialBackend;
-}
-
-function profileFields(profile: string) {
-  const entry = loadConfig().profiles?.[profile];
-  const resolved = entry
-    ? resolveProfileApiKey(profile, entry.apiUrl)
-    : undefined;
-  return { entry, resolved };
 }
 
 function credentialLabel(resolved: { source: string } | undefined): string {
@@ -50,16 +43,17 @@ function credentialLabel(resolved: { source: string } | undefined): string {
 
 export function listProfilesCommand(): void {
   try {
-    const names = listProfileNames();
+    const config = loadConfig();
+    const names = Object.keys(config.profiles ?? {}).sort();
     if (names.length === 0) {
       console.log("No profiles yet. Run `upshare login` to create one.");
       console.log(pc.dim("Run `upshare profile add <name>` to add another."));
       return;
     }
-    const current = getActiveProfileName();
+    const current = config.currentProfile ?? getActiveProfileName();
     printHeading("Profiles");
     for (const name of names) {
-      const { entry } = profileFields(name);
+      const entry = config.profiles?.[name];
       const marker = name === current ? ` ${pc.green("(current)")}` : "";
       printFields([
         ["Name", `${sanitizeTerminalText(name)}${marker}`],
@@ -137,12 +131,23 @@ export function addProfileCommand(
 
 export function showProfileCommand(name?: string): void {
   try {
+    const config = loadConfig();
     const profile = getActiveProfileName(name);
-    const { entry, resolved } = profileFields(profile);
+    const entry = config.profiles?.[profile];
     if (!entry) {
       printError(`Profile "${profile}" not found.`);
       process.exitCode = 1;
       return;
+    }
+    let resolved: { source: string } | undefined;
+    try {
+      resolved = resolveProfileApiKey(profile, entry.apiUrl) ?? undefined;
+    } catch (error) {
+      printWarning(
+        error instanceof Error
+          ? `Could not read stored credential: ${error.message}`
+          : "Could not read stored credential."
+      );
     }
     printHeading(`Profile "${profile}"`);
     printFields([
@@ -170,6 +175,7 @@ export function showProfileCommand(name?: string): void {
   }
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: command handler with credential rollback
 export async function removeProfileCommand(
   name: string,
   options?: { backend?: CredentialBackend; yes?: boolean }
@@ -185,7 +191,17 @@ export async function removeProfileCommand(
     process.exitCode = 1;
     return;
   }
-  const entry = loadConfig().profiles?.[profile];
+  let config: CliConfig;
+  try {
+    config = loadConfig();
+  } catch (error) {
+    printError(
+      error instanceof Error ? error.message : "Failed to load profiles."
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const entry = config.profiles?.[profile];
   if (!entry) {
     printError(`Profile "${profile}" not found. Nothing to remove.`);
     process.exitCode = 1;
@@ -193,35 +209,30 @@ export async function removeProfileCommand(
   }
 
   if (!options?.yes) {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-    try {
-      const answer = await rl.question(
-        pc.yellow(
-          `Remove profile "${profile}" and its stored credential? (y/N): `
-        )
-      );
-      if (
-        answer.trim().toLowerCase() !== "y" &&
-        answer.trim().toLowerCase() !== "yes"
-      ) {
-        console.log(pc.dim("Remove cancelled."));
+    const ok = await confirm(
+      `Remove profile "${profile}" and its stored credential? (y/N): `,
+      { yes: options?.yes }
+    );
+    if (!ok) {
+      if (process.exitCode === 130) {
         return;
       }
-    } catch {
-      console.log();
       console.log(pc.dim("Remove cancelled."));
       return;
-    } finally {
-      rl.close();
     }
   }
 
+  const account = getKeyringAccount(profile, entry.apiUrl);
+  let previousKey: string | undefined;
+  try {
+    previousKey = backend.get(account) ?? undefined;
+  } catch {
+    previousKey = undefined;
+  }
+  let deletedCredential = false;
   let storeError: Error | undefined;
   try {
-    deleteProfileCredential(profile, entry.apiUrl, backend);
+    deletedCredential = deleteProfileCredential(profile, entry.apiUrl, backend);
   } catch (error) {
     storeError =
       error instanceof Error
@@ -231,6 +242,13 @@ export async function removeProfileCommand(
   try {
     removeProfileFromConfig(profile);
   } catch (error) {
+    if (deletedCredential && previousKey !== undefined) {
+      try {
+        backend.set(account, previousKey);
+      } catch {
+        // Intentionally ignored: rollback is best-effort.
+      }
+    }
     printError(
       error instanceof Error ? error.message : "Failed to remove profile."
     );

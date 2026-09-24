@@ -5,8 +5,9 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import type { ApiClient } from "./api-client";
 import type { DownloadJournal, DownloadState } from "./download-journal";
 import type { DownloadResponse } from "./schemas";
+import { wait } from "./wait";
 
-const DOWNLOAD_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 const URL_REFRESH_AGE_MS = 4 * 60 * 1000;
 const RETRY_BASE_DELAY_MS = 500;
 const RETRY_MAX_DELAY_MS = 8000;
@@ -53,7 +54,7 @@ function waitBeforeRetry(retryNumber: number): Promise<void> {
     RETRY_MAX_DELAY_MS,
     RETRY_BASE_DELAY_MS * 2 ** (retryNumber - 1)
   );
-  return new Promise((resolve) => setTimeout(resolve, delay));
+  return wait(delay);
 }
 
 function assertSameFile(
@@ -79,20 +80,25 @@ function createUrlProvider(
   let refreshPromise: Promise<DownloadResponse> | undefined;
 
   const refresh = (): Promise<DownloadResponse> => {
-    if (!refreshPromise) {
-      refreshPromise = client
-        .resolveDownload(target)
-        .then((refreshed) => {
-          assertSameFile(initial, refreshed);
-          current = refreshed;
-          resolvedAt = Date.now();
-          return refreshed;
-        })
-        .finally(() => {
-          refreshPromise = undefined;
-        });
+    const inFlight = refreshPromise;
+    if (inFlight) {
+      return inFlight;
     }
-    return refreshPromise;
+    const started: Promise<DownloadResponse> = client
+      .resolveDownload(target)
+      .then((refreshed) => {
+        assertSameFile(initial, refreshed);
+        current = refreshed;
+        resolvedAt = Date.now();
+        return refreshed;
+      })
+      .finally(() => {
+        if (refreshPromise === started) {
+          refreshPromise = undefined;
+        }
+      });
+    refreshPromise = started;
+    return started;
   };
 
   return {
@@ -109,6 +115,15 @@ function createUrlProvider(
       return current.downloadUrl;
     },
   };
+}
+
+function assertEtagMatches(
+  etag: string,
+  expectedEtag: string | undefined
+): void {
+  if (expectedEtag && etag !== expectedEtag) {
+    throw new Error("The remote file changed while it was downloading.");
+  }
 }
 
 async function downloadChunkWithRetries(options: {
@@ -132,16 +147,11 @@ async function downloadChunkWithRetries(options: {
         options.chunkIndex,
         options.chunkSize,
         options.fileSize,
-        options.getExpectedEtag(),
         options.onProgress
       );
-      const expectedEtag = options.getExpectedEtag();
-      if (expectedEtag && etag !== expectedEtag) {
-        throw new Error("The remote file changed while it was downloading.");
-      }
+      assertEtagMatches(etag, options.getExpectedEtag());
       return etag;
     } catch (error) {
-      options.onProgress(0, 0);
       if (attempt >= options.retries) {
         throw error;
       }
@@ -160,7 +170,6 @@ async function downloadChunk(
   chunkIndex: number,
   chunkSize: number,
   fileSize: number,
-  expectedEtag: string | undefined,
   onProgress: (loaded: number, received: number) => void
 ): Promise<string> {
   const { end, length, start } = getChunkBounds(
@@ -191,10 +200,6 @@ async function downloadChunk(
   if (!etag) {
     await response.body.cancel();
     throw new Error("Storage did not return a file ETag.");
-  }
-  if (expectedEtag && etag !== expectedEtag) {
-    await response.body.cancel();
-    throw new Error("The remote file changed while it was downloading.");
   }
 
   let loaded = 0;
@@ -256,6 +261,23 @@ export async function downloadFileInRanges(
   let expectedEtag = state.etag;
   let failure: unknown;
 
+  try {
+    const partStat = fs.statSync(partPath);
+    if (!partStat.isFile() || partStat.size !== fileInfo.fileSize) {
+      throw new Error(
+        `Partial download has the wrong size: ${partPath}. Delete the .part/.journal files or re-run with --force to restart.`
+      );
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(
+        `Partial download is missing: ${partPath}. Delete the .journal file or re-run with --force to restart.`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+
   const reportProgress = () => {
     const inFlightBytes = [...inFlight.values()].reduce(
       (total, value) => total + value,
@@ -272,50 +294,49 @@ export async function downloadFileInRanges(
   reportProgress();
 
   const worker = async () => {
-    if (failure || cursor >= pendingChunks.length) {
-      return;
-    }
-    const chunkIndex = pendingChunks[cursor];
-    cursor += 1;
-
-    try {
-      const etag = await downloadChunkWithRetries({
-        chunkIndex,
-        chunkSize: state.chunkSize,
-        fileSize: fileInfo.fileSize,
-        getExpectedEtag: () => expectedEtag,
-        onProgress: (loaded, received) => {
-          inFlight.set(chunkIndex, loaded);
-          networkBytes += received;
-          reportProgress();
-        },
-        partPath,
-        retries,
-        urls,
-      });
-      if (expectedEtag && etag !== expectedEtag) {
-        throw new Error("The remote file changed while it was downloading.");
+    for (;;) {
+      if (failure || cursor >= pendingChunks.length) {
+        return;
       }
-      if (!expectedEtag) {
-        journal.appendEtag(etag);
-        expectedEtag = etag;
-      }
-      inFlight.delete(chunkIndex);
-      journal.appendCompletedChunk(chunkIndex);
-      completedChunks.add(chunkIndex);
-      completedBytes += getChunkBounds(
-        chunkIndex,
-        state.chunkSize,
-        fileInfo.fileSize
-      ).length;
-      reportProgress();
-    } catch (error) {
-      inFlight.delete(chunkIndex);
-      reportProgress();
-      failure ??= error;
-    }
+      const chunkIndex = pendingChunks[cursor] as number;
+      cursor += 1;
 
-    await worker();
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: worker claims next chunk per iteration
+        const etag = await downloadChunkWithRetries({
+          chunkIndex,
+          chunkSize: state.chunkSize,
+          fileSize: fileInfo.fileSize,
+          getExpectedEtag: () => expectedEtag,
+          onProgress: (loaded, received) => {
+            inFlight.set(chunkIndex, loaded);
+            networkBytes += received;
+            reportProgress();
+          },
+          partPath,
+          retries,
+          urls,
+        });
+        assertEtagMatches(etag, expectedEtag);
+        if (!expectedEtag) {
+          journal.appendEtag(etag);
+          expectedEtag = etag;
+        }
+        inFlight.delete(chunkIndex);
+        journal.appendCompletedChunk(chunkIndex);
+        completedChunks.add(chunkIndex);
+        completedBytes += getChunkBounds(
+          chunkIndex,
+          state.chunkSize,
+          fileInfo.fileSize
+        ).length;
+        reportProgress();
+      } catch (error) {
+        inFlight.delete(chunkIndex);
+        reportProgress();
+        failure ??= error;
+      }
+    }
   };
 
   await Promise.all(

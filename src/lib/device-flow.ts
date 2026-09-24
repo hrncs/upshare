@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import { RetryableApiError } from "./api-client";
 import type { DeviceTokenErrorResponse, DeviceTokenResponse } from "./schemas";
+import { wait } from "./wait";
 
 const CONNECTION_BACKOFF_MAX_SECONDS = 60;
+const SLOW_DOWN_MAX_SECONDS = 60;
 
 function getBrowserCommand(url: string): { args: string[]; file: string } {
   if (process.platform === "win32") {
@@ -23,13 +25,39 @@ export function openBrowser(url: string): boolean {
       windowsHide: true,
     });
     child.once("error", () => {
-      // The URL is always printed, so a missing launcher remains recoverable.
+      // Intentionally ignored: fire-and-forget; use openBrowserAsync for a result.
     });
     child.unref();
     return true;
   } catch {
     return false;
   }
+}
+
+export function openBrowserAsync(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let command: { args: string[]; file: string };
+    try {
+      command = getBrowserCommand(url);
+    } catch {
+      resolve(false);
+      return;
+    }
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command.file, command.args, {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.once("error", () => resolve(false));
+    child.once("close", (code) => resolve(code === 0 || code === null));
+    child.unref();
+  });
 }
 
 interface PollDeviceTokenOptions {
@@ -41,24 +69,22 @@ interface PollDeviceTokenOptions {
   >;
 }
 
-function wait(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function terminalError(error: DeviceTokenErrorResponse): Error {
+function terminalError(
+  error: DeviceTokenErrorResponse
+): Error & { code: string } {
   const serverDescription = error.error_description;
+  let message: string;
   if (error.error === "access_denied") {
-    return new Error(serverDescription ?? "Authorization was denied.");
-  }
-  if (error.error === "expired_token") {
-    return new Error(
+    message = serverDescription ?? "Authorization was denied.";
+  } else if (error.error === "expired_token") {
+    message =
       serverDescription ??
-        "Authorization expired. Run the command again to get a new code."
-    );
+      "Authorization expired. Run the command again to get a new code.";
+  } else {
+    message =
+      serverDescription ?? `Device authorization failed: ${error.error}.`;
   }
-  return new Error(
-    serverDescription ?? `Device authorization failed: ${error.error}.`
-  );
+  return Object.assign(new Error(message), { code: error.error });
 }
 
 export async function pollForDeviceToken({
@@ -98,7 +124,10 @@ export async function pollForDeviceToken({
       continue;
     }
     if (result.error.error === "slow_down") {
-      nextIntervalSeconds += 5;
+      nextIntervalSeconds = Math.min(
+        nextIntervalSeconds + 5,
+        SLOW_DOWN_MAX_SECONDS
+      );
       continue;
     }
     throw terminalError(result.error);

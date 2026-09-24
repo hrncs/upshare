@@ -1,33 +1,39 @@
 import pc from "picocolors";
-import { ApiClient } from "../lib/api-client";
+import { ApiClient, RetryableApiError } from "../lib/api-client";
 import {
   cleanIdentifier,
   formatBytes,
   formatRelativeTime,
+  sanitizeTerminalText,
 } from "../lib/format";
 import { printError, printFields, printHeading } from "../lib/output";
 import type { FileInfoResponse, MultipartResumeResponse } from "../lib/schemas";
 import { createSpinner } from "../lib/spinner";
+
+const RETRYABLE_INFO_ERROR_PATTERN =
+  /401|403|unauthor|forbidden|connect|network|timed?\s?out/i;
 
 function printPartialInfo(
   fileId: string,
   fileSize: number,
   resume: MultipartResumeResponse | null
 ): void {
+  const hint =
+    "Run the same upload command to continue; `upshare abort` frees the space.";
   printHeading("Partial upload");
   if (!resume) {
     printFields([
-      ["ID", fileId],
+      ["ID", sanitizeTerminalText(fileId)],
       ["Size", formatBytes(fileSize)],
       ["Progress", "Waiting to finish - retry the upload to continue"],
-      ["Free space", "upshare abort"],
+      ["Hint", hint],
     ]);
     console.log();
     return;
   }
   if (resume.storageCompleted) {
     printFields([
-      ["ID", resume.fileId],
+      ["ID", sanitizeTerminalText(resume.fileId)],
       ["Size", formatBytes(fileSize)],
       ["Progress", "All bytes received, not finalized yet"],
       ["Resume", "Run the same upload command again to continue"],
@@ -39,9 +45,12 @@ function printPartialInfo(
     (total, part) => total + part.size,
     0
   );
-  const percent = Math.min(100, Math.round((doneBytes / fileSize) * 1000) / 10);
+  const percent =
+    fileSize > 0
+      ? Math.min(100, Math.round((doneBytes / fileSize) * 1000) / 10)
+      : 0;
   printFields([
-    ["ID", resume.fileId],
+    ["ID", sanitizeTerminalText(resume.fileId)],
     ["Size", formatBytes(fileSize)],
     ["Progress", `${resume.uploadedParts.length}/${resume.partCount} parts`],
     [
@@ -49,9 +58,16 @@ function printPartialInfo(
       `${formatBytes(doneBytes)} of ${formatBytes(fileSize)} (${percent}%)`,
     ],
     ["Resume", "Run the same upload command again to continue"],
-    ["Free space", "upshare abort"],
+    ["Hint", hint],
   ]);
   console.log();
+}
+
+function formatStatus(status: string): string {
+  if (!status) {
+    return "Active";
+  }
+  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 export async function infoCommand(
@@ -80,20 +96,30 @@ export async function infoCommand(
       return;
     }
 
-    if (data.file.status === "uploading") {
-      const resume = await client
-        .getMultipartUpload(data.file.id)
-        .catch(() => null);
+    if (data.file.status === "uploading" || data.file.status === "finalizing") {
+      let resume: MultipartResumeResponse | null = null;
+      try {
+        resume = await client.getMultipartUpload(data.file.id);
+      } catch (error) {
+        if (error instanceof RetryableApiError) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : "";
+        if (RETRYABLE_INFO_ERROR_PATTERN.test(message)) {
+          throw error;
+        }
+        resume = null;
+      }
       printPartialInfo(data.file.id, data.file.fileSize, resume);
       return;
     }
 
-    printHeading(data.file.fileName);
+    printHeading(sanitizeTerminalText(data.file.fileName));
     const fields: [string, string][] = [
-      ["ID", data.file.id],
+      ["ID", sanitizeTerminalText(data.file.id)],
       ["Size", formatBytes(data.file.fileSize)],
-      ["Type", data.file.mimeType],
-      ["Status", "Active"],
+      ["Type", sanitizeTerminalText(data.file.mimeType)],
+      ["Status", formatStatus(data.file.status)],
       ["Uploaded", new Date(data.file.createdAt).toLocaleString()],
       [
         "Expires",
@@ -103,7 +129,7 @@ export async function infoCommand(
     if (data.shareLink) {
       fields.push(
         ["Share link", pc.cyan(pc.bold(data.shareLink.shareUrl))],
-        ["Token", data.shareLink.token],
+        ["Token", sanitizeTerminalText(data.shareLink.token)],
         ["Views", String(data.shareLink.viewsCount)]
       );
     } else {

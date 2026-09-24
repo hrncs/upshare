@@ -1,39 +1,33 @@
 import pc from "picocolors";
-import { ApiClient } from "../lib/api-client";
-import { cleanIdentifier, formatRelativeTime } from "../lib/format";
+import { formatRelativeTime } from "../lib/format";
 import { printError, printFields, printWarning } from "../lib/output";
-import { createSpinner } from "../lib/spinner";
-import { parseDurationHours } from "../lib/validation";
+import { resolveShareTarget, startShareSpinner } from "../lib/share-helpers";
 
 export async function extendCommand(
   target: string,
   options?: { apiUrl?: string; duration?: string; profile?: string }
 ): Promise<void> {
-  const id = cleanIdentifier(target);
-  if (!id) {
-    printError("File identifier or share token is required.");
-    process.exitCode = 1;
-    return;
-  }
-
-  let durationHours: number;
+  let resolved: ReturnType<typeof resolveShareTarget>;
   try {
-    durationHours = parseDurationHours(options?.duration, 24, 0.5);
+    resolved = resolveShareTarget(target, options);
   } catch (error) {
     printError(error instanceof Error ? error.message : "Invalid duration");
     process.exitCode = 1;
     return;
   }
 
-  const client = new ApiClient({
-    apiUrl: options?.apiUrl,
-    profile: options?.profile,
-  });
-  const spinner = createSpinner(`Extending expiration for '${id}'...`).start();
+  const spinner = startShareSpinner(
+    `Extending expiration for '${resolved.id}'...`
+  );
 
   try {
-    const result = await client.extendShare(id, durationHours);
-    spinner.succeed(`Expiration extended for ${result.fileName || id}`);
+    const result = await resolved.client.extendShare(
+      resolved.id,
+      resolved.durationHours
+    );
+    spinner.succeed(
+      `Expiration extended for ${result.fileName || resolved.id}`
+    );
 
     console.log();
     printFields([

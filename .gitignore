@@ -13,7 +13,6 @@ dist/
 .env
 .env.*
 *.env
-!.env.example
 
 # Local audit and scratch documents
 audit.md

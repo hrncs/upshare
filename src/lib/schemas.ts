@@ -1,10 +1,36 @@
 import { z } from "zod";
 import { sanitizeTerminalText } from "./format";
 
+export const MAX_PAGE_SIZE = 500;
+
+export const FILE_ID_REGEX = /^f_[A-Za-z0-9_-]{21}$/;
+export const LEGACY_FILE_ID_REGEX = /^[A-Za-z0-9_-]{21}$/;
+export const fileIdSchema = z.union([
+  z.string().regex(FILE_ID_REGEX),
+  z.string().regex(LEGACY_FILE_ID_REGEX),
+]);
+
 const dateString = z.iso.datetime({ offset: true });
 const byteCount = z.number().int().nonnegative().safe();
-const fileStatus = z.enum(["uploading", "active", "deleting", "deleted"]);
+const fileStatus = z.enum([
+  "uploading",
+  "finalizing",
+  "active",
+  "deleting",
+  "deleted",
+]);
+
 const displayText = z.string().min(1).transform(sanitizeTerminalText);
+
+const fileSort = z.enum([
+  "newest",
+  "oldest",
+  "largest",
+  "smallest",
+  "shared",
+  "unshared",
+]);
+
 const isSafeFileName = (name: string) =>
   ![...name].some((character) => {
     const code = character.charCodeAt(0);
@@ -27,9 +53,18 @@ export const quotaSchema = z.object({
   usedBytes: byteCount,
 });
 
+const whoamiQuotaSchema = z.object({
+  isLegacy: z.boolean().optional(),
+  maxQuotaBytes: byteCount,
+  periodKey: z.string().regex(/^\d{4}-\d{2}$/),
+  remainingBytes: byteCount,
+  reservedBytes: byteCount.default(0),
+  usedBytes: byteCount,
+});
+
 export const whoamiResponseSchema = z.object({
   authType: z.string(),
-  quota: quotaSchema.extend({ remainingBytes: byteCount }),
+  quota: whoamiQuotaSchema,
   user: z.object({
     email: z.email().transform(sanitizeTerminalText),
     id: z.string().min(1),
@@ -39,7 +74,8 @@ export const whoamiResponseSchema = z.object({
 
 const healthCheckSchema = z.object({
   latencyMs: z.number().int().nonnegative().optional(),
-  status: z.string().min(1),
+  state: z.string().min(1).optional(),
+  status: z.string().min(1).optional(),
 });
 
 export const healthResponseSchema = z.object({
@@ -69,6 +105,7 @@ const uploadRequestResponseUnion = z.discriminatedUnion("uploadType", [
     uploadType: z.literal("multipart"),
   }),
 ]);
+
 export const uploadRequestResponseSchema = z.preprocess((input) => {
   if (
     input &&
@@ -139,14 +176,14 @@ export const listFilesResponseSchema = z.object({
   ),
   hasMore: z.boolean(),
   page: z.number().int().positive().safe(),
-  pageSize: z.number().int().positive().max(500).safe(),
+  pageSize: z.number().int().positive().max(MAX_PAGE_SIZE).safe(),
   quota: quotaSchema.pick({
     maxQuotaBytes: true,
     periodKey: true,
     reservedBytes: true,
     usedBytes: true,
   }),
-  sort: z.literal("newest"),
+  sort: fileSort,
   totalFiles: byteCount,
 });
 

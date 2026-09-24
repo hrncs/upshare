@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanIdentifier, formatBytes, formatDuration } from "./format";
 import { isFileId } from "./identifiers";
 import { printError, printFields, printSuccess, printWarning } from "./output";
-import { createSpinner } from "./spinner";
+import { createSpinner, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "./spinner";
 import { editDistance, suggestCommand } from "./suggest";
 import {
   createTransferProgressLine,
@@ -17,11 +17,25 @@ afterEach(() => {
 });
 
 describe("spinner", () => {
-  it("uses the shared text-only animation", () => {
-    const spinner = createSpinner({ isSilent: true, text: "Working..." });
+  it("uses the shared dots animation", () => {
+    expect(SPINNER_INTERVAL_MS).toBe(80);
+    expect(SPINNER_FRAMES).toEqual([
+      "⠋",
+      "⠙",
+      "⠹",
+      "⠸",
+      "⠼",
+      "⠴",
+      "⠦",
+      "⠧",
+      "⠇",
+      "⠏",
+    ]);
 
-    expect(spinner.interval).toBe(100);
-    expect(spinner.spinner.frames).toEqual(["-", "\\", "|", "/"]);
+    const spinner = createSpinner({ isSilent: true, text: "Working..." });
+    expect(spinner.text).toBe("Working...");
+    spinner.text = "Still working...";
+    expect(spinner.text).toBe("Still working...");
   });
 
   it("does not print transient progress when output is redirected", () => {

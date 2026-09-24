@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.22] - 2026-09-24
+
+### Changed
+- **BREAKING**: Node.js `>= 22` is now required (Node 20 is end-of-life and no longer receives security updates).
+- Replaced `ora` with zero-dependency `picospinner`.
+
 ## [0.0.21] - 2026-09-24
 
 ### Added

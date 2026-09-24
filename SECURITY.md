@@ -6,8 +6,8 @@ Only the latest release receives security patches.
 
 | Version  | Supported |
 | -------- | --------- |
-| 0.0.21   | Yes       |
-| < 0.0.21 | No        |
+| 0.0.22   | Yes       |
+| < 0.0.22 | No        |
 
 ## Reporting a Vulnerability
 

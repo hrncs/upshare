@@ -28,6 +28,8 @@ const PERMISSION_DENIED_REGEX = /permission denied/;
 
 const spinner = vi.hoisted(() => ({
   fail: vi.fn(),
+  running: false,
+  setText: vi.fn(),
   stop: vi.fn(),
   succeed: vi.fn(),
 }));
@@ -37,8 +39,8 @@ const readline = vi.hoisted(() => ({
   question: vi.fn(),
 }));
 
-vi.mock("ora", () => ({
-  default: () => ({ ...spinner, start: () => spinner }),
+vi.mock("picospinner", () => ({
+  Spinner: vi.fn(() => ({ ...spinner, start: () => spinner })),
 }));
 
 vi.mock("node:readline/promises", () => ({

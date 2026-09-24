@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Node.js**: `>= 20.11`
+- **Node.js**: `>= 22`
 - **Package Manager**: `pnpm`
 
 ## Getting Started

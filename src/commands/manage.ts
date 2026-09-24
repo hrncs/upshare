@@ -47,10 +47,9 @@ async function getManagePage(
     return cached;
   }
 
-  const spinner = createSpinner({
-    discardStdin: false,
-    text: page === 1 ? "Fetching active files..." : "Fetching more files...",
-  }).start();
+  const spinner = createSpinner(
+    page === 1 ? "Fetching active files..." : "Fetching more files..."
+  ).start();
   try {
     const data = await client.listFiles({
       page,
@@ -257,10 +256,7 @@ export async function manageCommand(
   let chosenFile: UserFileItem | null = null;
 
   if (target) {
-    const spinner = createSpinner({
-      discardStdin: false,
-      text: "Looking up file...",
-    }).start();
+    const spinner = createSpinner("Looking up file...").start();
     try {
       const direct = await client.getFile(target);
       spinner.stop();

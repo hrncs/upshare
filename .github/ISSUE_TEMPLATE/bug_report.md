@@ -24,7 +24,7 @@ A clear and concise description of what you expected to happen.
 
 ## Environment Information
 - **OS**: [e.g. Windows 11, macOS Sonoma, Ubuntu 24.04]
-- **Node.js Version**: [e.g. 20.11.0] (`node -v`)
+- **Node.js Version**: [e.g. 22.17.0] (`node -v`)
 - **UpShare Version**: [e.g. 0.0.17] (`upshare --version`)
 - **Filesystem / Storage** (if file transfer issue): [e.g. NTFS, APFS, ext4, FAT32/exFAT]
 

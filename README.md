@@ -11,7 +11,7 @@ download, share, and manage your files from your terminal.
 
 ## Installation & Usage
 
-Requires Node.js 20.11 or newer.
+Requires Node.js >= 22
 
 ```bash
 # Run directly with npx

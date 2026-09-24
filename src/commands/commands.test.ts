@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import packageJson from "../../package.json";
 import { ApiClient, FILE_LIST_PAGE_SIZE } from "../lib/api-client";
 import type {
   FileInfoResponse,
@@ -28,6 +29,8 @@ const PERMISSION_DENIED_REGEX = /permission denied/;
 
 const spinner = vi.hoisted(() => ({
   fail: vi.fn(),
+  running: false,
+  setText: vi.fn(),
   stop: vi.fn(),
   succeed: vi.fn(),
 }));
@@ -37,8 +40,8 @@ const readline = vi.hoisted(() => ({
   question: vi.fn(),
 }));
 
-vi.mock("ora", () => ({
-  default: () => ({ ...spinner, start: () => spinner }),
+vi.mock("picospinner", () => ({
+  Spinner: vi.fn(() => ({ ...spinner, start: () => spinner })),
 }));
 
 vi.mock("node:readline/promises", () => ({
@@ -53,6 +56,11 @@ vi.mock("node:child_process", () => ({
 
 const mockedSpawnSync = vi.mocked(spawnSync);
 const originalArgv = [...process.argv];
+
+const [betaMajor, betaMinor, betaPatch] = packageJson.version
+  .split("-")[0]
+  .split(".");
+const NEXT_BETA_VERSION = `${betaMajor}.${betaMinor}.${Number.parseInt(betaPatch, 10) + 1}-beta`;
 
 const expiresAt = "2026-09-07T00:00:00.000Z";
 const DEFAULT_API = "https://upshare.app";
@@ -742,7 +750,7 @@ describe("upgradeCommand", () => {
   });
 
   it("upgrades to the beta tag with --beta", async () => {
-    mockRegistry({ version: "0.0.22-beta" });
+    mockRegistry({ version: NEXT_BETA_VERSION });
     mockedSpawnSync.mockReturnValue({ status: 0 } as never);
 
     await expect(upgradeCommand({ beta: true })).resolves.toBe(true);
@@ -754,7 +762,7 @@ describe("upgradeCommand", () => {
       expect.objectContaining({ stdio: "inherit" })
     );
     expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
-      "Upgraded to 0.0.22-beta"
+      `Upgraded to ${NEXT_BETA_VERSION}`
     );
   });
 

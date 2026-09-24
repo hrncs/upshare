@@ -1,7 +1,7 @@
 {
   "name": "upshare",
-  "version": "0.0.21",
-  "description": "Official CLI for UpShare — upload, download, and manage your files securely via API key.",
+  "version": "0.0.22",
+  "description": "Official UpShare CLI: securely upload, download, share, and manage your files.",
   "keywords": [
     "upshare",
     "cli",
@@ -44,8 +44,8 @@
   "dependencies": {
     "@napi-rs/keyring": "2.1.0",
     "commander": "^15.0.0",
-    "ora": "^9.4.1",
     "picocolors": "^1.1.1",
+    "picospinner": "^3.1.2",
     "zod": "^4.5.4"
   },
   "devDependencies": {
@@ -58,6 +58,6 @@
   },
   "packageManager": "pnpm@10.32.0",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   }
 }

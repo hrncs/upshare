@@ -6,10 +6,9 @@ import { createSpinner } from "../lib/spinner";
 
 export const SUPPORT_EMAIL = "support@upshare.app";
 
-function checkLabel(check: { status: string }): string {
-  return check.status.toLowerCase() === "ok"
-    ? pc.green("ok")
-    : pc.yellow(check.status);
+function checkLabel(check: { state?: string; status?: string }): string {
+  const value = check.status ?? check.state ?? "unknown";
+  return value.toLowerCase() === "ok" ? pc.green("ok") : pc.yellow(value);
 }
 
 export async function statusCommand(options?: {
@@ -21,8 +20,14 @@ export async function statusCommand(options?: {
     apiUrl: options?.apiUrl,
     profile: options?.profile,
   });
-  const showSupport =
-    getEffectiveApiUrl(options?.apiUrl, options?.profile) === DEFAULT_API_URL;
+
+  let showSupport = false;
+  try {
+    showSupport =
+      getEffectiveApiUrl(options?.apiUrl, options?.profile) === DEFAULT_API_URL;
+  } catch {
+    showSupport = false;
+  }
 
   try {
     const data = await client.checkHealth();

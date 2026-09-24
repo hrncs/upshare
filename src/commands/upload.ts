@@ -45,6 +45,7 @@ const MIME_MAP: Record<string, string> = {
   ".zip": "application/zip",
 };
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024 * 1024;
+const MAX_FILE_SIZE_LABEL = "50 GiB";
 const DEFAULT_MULTIPART_CONCURRENCY = 16;
 const MAX_MULTIPART_CONCURRENCY = 16;
 const DEFAULT_RETRIES = 5;
@@ -98,6 +99,10 @@ export async function uploadFileRange(
       callback(null, chunk);
     },
   });
+
+  fileStream.on("error", (error) => {
+    progressStream.destroy(error);
+  });
   try {
     const response = await fetch(uploadUrl, {
       body: fileStream.pipe(progressStream),
@@ -133,6 +138,11 @@ async function uploadMultipartPart(
   const start = (signedPart.partNumber - 1) * preparation.partSize;
   const length = Math.min(preparation.partSize, fileSize - start);
   let { uploadUrl } = signedPart;
+  if (!uploadUrl) {
+    throw new Error(
+      `Server returned no upload URL for part ${signedPart.partNumber}.`
+    );
+  }
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -158,11 +168,16 @@ async function uploadMultipartPart(
       onProgress(signedPart.partNumber, 0, 0);
       if (attempt < retries) {
         await waitBeforeRetry(attempt + 1);
-        const [replacement] = await client.requestUploadPartUrls(
-          preparation.fileId,
-          [signedPart.partNumber]
-        );
-        ({ uploadUrl } = replacement);
+        try {
+          const replacement = await requestSinglePartUrlWithRetry(
+            client,
+            preparation.fileId,
+            signedPart.partNumber
+          );
+          ({ uploadUrl } = replacement);
+        } catch (refreshError) {
+          lastError = refreshError;
+        }
       }
     }
   }
@@ -170,6 +185,73 @@ async function uploadMultipartPart(
   throw lastError instanceof Error
     ? lastError
     : new Error("Multipart upload failed.");
+}
+
+async function requestSinglePartUrlWithRetry(
+  client: ApiClient,
+  fileId: string,
+  partNumber: number,
+  attempts = 3
+): Promise<UploadPartUrl> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: sequential
+      const [replacement] = await client.requestUploadPartUrls(fileId, [
+        partNumber,
+      ]);
+      if (!replacement?.uploadUrl) {
+        throw new Error(
+          `Server returned no upload URL for part ${partNumber}.`
+        );
+      }
+      return replacement;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await waitBeforeRetry(attempt);
+      }
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Server returned no upload URL for part ${partNumber}.`);
+}
+
+async function requestPartUrlsWithRetry(
+  client: ApiClient,
+  fileId: string,
+  partNumbers: number[],
+  attempts = 3
+): Promise<UploadPartUrl[]> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: sequential
+      const parts = await client.requestUploadPartUrls(fileId, partNumbers);
+      if (!parts || parts.length === 0) {
+        throw new Error(
+          `Server returned no upload URLs for part(s) ${partNumbers.join(", ")}.`
+        );
+      }
+      for (const part of parts) {
+        if (!part.uploadUrl) {
+          throw new Error(
+            `Server returned no upload URL for part ${part.partNumber}.`
+          );
+        }
+      }
+      return parts;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await waitBeforeRetry(attempt);
+      }
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Failed to prepare upload parts.");
 }
 
 function getPartSize(
@@ -232,7 +314,8 @@ async function uploadMultipartFile(
       firstPending + concurrency
     );
     // biome-ignore lint/performance/noAwaitInLoops: sequential
-    const signedParts = await client.requestUploadPartUrls(
+    const signedParts = await requestPartUrlsWithRetry(
+      client,
       preparation.fileId,
       partNumbers
     );
@@ -283,13 +366,27 @@ async function uploadMultipartFile(
 }
 
 async function uploadSingleFile(
-  uploadUrl: string,
+  client: ApiClient,
+  initialUploadUrl: string,
+  initialFileId: string,
   filePath: string,
   fileSize: number,
   mimeType: string,
   retries: number,
-  onProgress: (completedBytes: number, networkBytes: number) => void
-): Promise<number> {
+  onProgress: (completedBytes: number, networkBytes: number) => void,
+  refreshParams: {
+    expiryHours: number;
+    fileName: string;
+    fileSize: number;
+    mimeType: string;
+  },
+  onFileIdRefreshed?: (fileId: string) => void
+): Promise<{ fileId: string; networkBytes: number }> {
+  let uploadUrl = initialUploadUrl;
+  let fileId = initialFileId;
+  if (!uploadUrl) {
+    throw new Error("Server returned no upload URL for this file.");
+  }
   let networkBytes = 0;
   let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -304,16 +401,64 @@ async function uploadSingleFile(
           onProgress(loaded, networkBytes);
         },
       });
-      return networkBytes;
+      return { fileId, networkBytes };
     } catch (error) {
       lastError = error;
       onProgress(0, networkBytes);
       if (attempt < retries) {
         await waitBeforeRetry(attempt + 1);
+
+        try {
+          const refreshed = await requestSingleUploadWithRetry(
+            client,
+            refreshParams
+          );
+          if (refreshed.fileId !== fileId) {
+            const staleFileId = fileId;
+            ({ fileId } = refreshed);
+            onFileIdRefreshed?.(fileId);
+            // Best-effort cleanup of the superseded single-part placeholder.
+            client.deleteFile(staleFileId).catch(() => undefined);
+          }
+          ({ uploadUrl } = refreshed);
+        } catch (refreshError) {
+          lastError = refreshError;
+        }
       }
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Upload failed.");
+}
+
+async function requestSingleUploadWithRetry(
+  client: ApiClient,
+  params: {
+    expiryHours: number;
+    fileName: string;
+    fileSize: number;
+    mimeType: string;
+  },
+  attempts = 3
+): Promise<{ fileId: string; uploadUrl: string }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: sequential
+      const preparation = await client.requestUpload(params);
+      if (preparation.uploadType !== "single" || !preparation.uploadUrl) {
+        throw new Error("Server returned no upload URL for this file.");
+      }
+      return { fileId: preparation.fileId, uploadUrl: preparation.uploadUrl };
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        await waitBeforeRetry(attempt);
+      }
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Server returned no upload URL for this file.");
 }
 
 export interface UploadCommandOptions {
@@ -388,19 +533,31 @@ export async function uploadCommand(
     return;
   }
   if (fileSize > MAX_FILE_SIZE_BYTES) {
-    printError("File exceeds the 50 GiB per-file limit.");
+    printError(`File exceeds the ${MAX_FILE_SIZE_LABEL} per-file limit.`);
     process.exitCode = 1;
     return;
   }
 
-  const { apiUrl, profile } = resolveCommandContext({
-    apiUrl: options?.apiUrl,
-    profile: options?.profile,
-  });
-  const client = new ApiClient({ apiUrl, profile });
-  const spinner = createSpinner(
+  let apiUrl: string;
+  let profile: string;
+  let client: ApiClient;
+  try {
+    ({ apiUrl, profile } = resolveCommandContext({
+      apiUrl: options?.apiUrl,
+      profile: options?.profile,
+    }));
+    client = new ApiClient({ apiUrl, profile });
+  } catch (error) {
+    printError(
+      error instanceof Error ? error.message : "Invalid profile or API URL."
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const prepareSpinner = createSpinner(
     `Preparing ${pc.bold(fileName)} (${formatBytes(fileSize)})...`
   ).start();
+  let activeSpinner = prepareSpinner;
   const expectedState = {
     apiUrl,
     filePath: resolvedPath,
@@ -419,18 +576,26 @@ export async function uploadCommand(
     transferProgress?.update(completedBytes, sentBytes);
   };
 
+  const failActiveSpinner = (message: string) => {
+    try {
+      activeSpinner.fail(message);
+    } catch {
+      printError(message);
+    }
+  };
+
   try {
     const savedState = loadUploadState(expectedState, {
       onInvalidated: (reason) => {
         if (reason === "modified") {
           printWarning(
-            "Local file was modified since previous partial upload. Run 'upshare abort' to free unused server quota."
+            "Previous partial upload invalidated (local file changed). Server-side partial still holds quota — run `upshare abort` to free it if you no longer need it."
           );
         }
       },
     });
     if (savedState) {
-      spinner.text = "Checking resumable upload...";
+      prepareSpinner.text = "Checking resumable upload...";
       preparation = await client.getMultipartUpload(savedState.fileId);
       if (!preparation) {
         clearUploadState(profile, apiUrl, resolvedPath);
@@ -449,7 +614,7 @@ export async function uploadCommand(
       }
     }
 
-    spinner.stop();
+    prepareSpinner.stop();
     transferProgress = createTransferProgressLine({
       action: "Uploading",
       startedAt: Date.now(),
@@ -458,14 +623,34 @@ export async function uploadCommand(
 
     let completedParts: CompletedUploadPart[] | undefined;
     if (preparation.uploadType === "single") {
-      networkBytes = await uploadSingleFile(
+      const singleResult = await uploadSingleFile(
+        client,
         preparation.uploadUrl,
+        preparation.fileId,
         resolvedPath,
         fileSize,
         mimeType,
         retries,
-        showProgress
+        showProgress,
+        { expiryHours, fileName, fileSize, mimeType },
+        (refreshedFileId) => {
+          preparation = {
+            ...(preparation as Extract<
+              UploadRequestResponse,
+              { uploadType: "single" }
+            >),
+            fileId: refreshedFileId,
+          };
+        }
       );
+      ({ networkBytes } = singleResult);
+      preparation = {
+        ...(preparation as Extract<
+          UploadRequestResponse,
+          { uploadType: "single" }
+        >),
+        fileId: singleResult.fileId,
+      };
     } else if (
       "storageCompleted" in preparation &&
       preparation.storageCompleted
@@ -492,15 +677,16 @@ export async function uploadCommand(
 
     transferProgress.clear();
     transferProgress = undefined;
-    spinner.start("Verifying...");
+    const verifySpinner = createSpinner("Verifying...").start();
+    activeSpinner = verifySpinner;
     const completeRes = await client.completeUpload(preparation.fileId, {
-      createShareLink: options?.share !== false,
+      createShareLink: options?.share ?? true,
       parts: completedParts,
       shareDurationHours,
     });
     clearUploadState(profile, apiUrl, resolvedPath);
 
-    spinner.succeed(`Uploaded ${fileName}`);
+    verifySpinner.succeed(`Uploaded ${fileName}`);
 
     const expiryDate = new Date(completeRes.file.expiresAt).toLocaleString();
     const totalSeconds = (Date.now() - commandStartedAt) / 1000;
@@ -541,10 +727,17 @@ export async function uploadCommand(
     console.log();
   } catch (error) {
     transferProgress?.clear();
+    transferProgress = undefined;
     if (preparation?.uploadType === "single") {
-      await client.deleteFile(preparation.fileId).catch(() => undefined);
+      try {
+        await client.deleteFile(preparation.fileId);
+      } catch (cleanupError) {
+        printWarning(
+          `Upload failed and the partial server file could not be cleaned up: ${cleanupError instanceof Error ? cleanupError.message : "unknown error"}. Run \`upshare abort\` to free quota.`
+        );
+      }
     }
-    spinner.fail(error instanceof Error ? error.message : "Upload failed");
+    failActiveSpinner(error instanceof Error ? error.message : "Upload failed");
     if (preparation?.uploadType === "multipart") {
       printWarning("Run the same command again to resume this upload.");
     }

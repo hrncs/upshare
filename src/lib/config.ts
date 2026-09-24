@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 
+export const VERSION_PATTERN =
+  /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+
 const userSchema = z.strictObject({
   email: z.email(),
   id: z.string().min(1),
@@ -18,10 +21,7 @@ const rawConfigSchema = z.strictObject({
   currentProfile: z.string().min(1).max(64).optional(),
   keyPrefix: z.string().min(1).max(32).optional(),
   lastUpdateCheck: z.number().int().nonnegative().optional(),
-  latestVersion: z
-    .string()
-    .regex(/^\d+\.\d+\.\d+(?:[-+].*)?$/)
-    .optional(),
+  latestVersion: z.string().regex(VERSION_PATTERN).optional(),
   profiles: z.record(z.string(), profileSchema).optional(),
   user: userSchema.optional(),
 });
@@ -93,14 +93,57 @@ export function normalizeApiUrl(value: string): string {
 
 type RawConfig = z.infer<typeof rawConfigSchema>;
 
+let configCache:
+  | { data: CliConfig; file: string; mtimeMs: number; size: number }
+  | undefined;
+
+function invalidateConfigCache(): void {
+  configCache = undefined;
+}
+
+function validateConfigDirEarly(directory: string): void {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(directory);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(
+      `Invalid UpShare configuration: ${directory} exists but is not a directory.`
+    );
+  }
+  try {
+    // biome-ignore lint/suspicious/noBitwiseOperators: fs.constants are bit flags by design
+    fs.accessSync(directory, fs.constants.R_OK | fs.constants.W_OK);
+  } catch (error) {
+    throw new Error(
+      `Invalid UpShare configuration: configuration directory ${directory} is not readable/writable. Check permissions.`,
+      { cause: error }
+    );
+  }
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: config migration handles legacy + per-profile validation in one pass
 function normalizeRawConfig(raw: RawConfig): CliConfig {
   const profiles: Record<string, ProfileConfig> = {};
   for (const [name, entry] of Object.entries(raw.profiles ?? {})) {
-    profiles[normalizeProfileName(name)] = {
-      apiUrl: normalizeApiUrl(entry.apiUrl),
-      ...(entry.keyPrefix === undefined ? {} : { keyPrefix: entry.keyPrefix }),
-      ...(entry.user === undefined ? {} : { user: entry.user }),
-    };
+    try {
+      profiles[normalizeProfileName(name)] = {
+        apiUrl: normalizeApiUrl(entry.apiUrl),
+        ...(entry.keyPrefix === undefined
+          ? {}
+          : { keyPrefix: entry.keyPrefix }),
+        ...(entry.user === undefined ? {} : { user: entry.user }),
+      };
+    } catch (error) {
+      console.warn(
+        `Warning: skipping invalid profile ${JSON.stringify(name)} in configuration: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
   if (
     profiles[DEFAULT_PROFILE] === undefined &&
@@ -108,16 +151,30 @@ function normalizeRawConfig(raw: RawConfig): CliConfig {
       raw.keyPrefix !== undefined ||
       raw.user !== undefined)
   ) {
-    profiles[DEFAULT_PROFILE] = {
-      apiUrl: normalizeApiUrl(raw.apiUrl ?? DEFAULT_API_URL),
-      ...(raw.keyPrefix === undefined ? {} : { keyPrefix: raw.keyPrefix }),
-      ...(raw.user === undefined ? {} : { user: raw.user }),
-    };
+    try {
+      profiles[DEFAULT_PROFILE] = {
+        apiUrl: normalizeApiUrl(raw.apiUrl ?? DEFAULT_API_URL),
+        ...(raw.keyPrefix === undefined ? {} : { keyPrefix: raw.keyPrefix }),
+        ...(raw.user === undefined ? {} : { user: raw.user }),
+      };
+    } catch (error) {
+      console.warn(
+        `Warning: skipping invalid legacy default profile: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+  let currentProfile: string | undefined;
+  if (raw.currentProfile !== undefined) {
+    try {
+      currentProfile = normalizeProfileName(raw.currentProfile);
+    } catch (error) {
+      console.warn(
+        `Warning: ignoring invalid currentProfile in configuration: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
   return {
-    ...(raw.currentProfile === undefined
-      ? {}
-      : { currentProfile: normalizeProfileName(raw.currentProfile) }),
+    ...(currentProfile === undefined ? {} : { currentProfile }),
     ...(raw.lastUpdateCheck === undefined
       ? {}
       : { lastUpdateCheck: raw.lastUpdateCheck }),
@@ -129,18 +186,71 @@ function normalizeRawConfig(raw: RawConfig): CliConfig {
 }
 
 export function loadConfig(): CliConfig {
-  const { configFile } = getConfigPaths();
+  const { configDirectory, configFile } = getConfigPaths();
+  validateConfigDirEarly(configDirectory);
   if (!fs.existsSync(configFile)) {
     return {};
   }
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    const stat = fs.statSync(configFile);
+    const cached = configCache;
+    if (
+      cached &&
+      cached.file === configFile &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.size === stat.size
+    ) {
+      return cached.data;
+    }
+    let rawText: string;
+    try {
+      rawText = fs.readFileSync(configFile, "utf8");
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        (error.code === "EACCES" || error.code === "EPERM")
+      ) {
+        throw new Error(
+          `Invalid UpShare configuration at ${configFile}: permission denied. Check file permissions.`,
+          { cause: error }
+        );
+      }
+      throw new Error(
+        `Invalid UpShare configuration at ${configFile}: could not be read.`,
+        { cause: error }
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (error) {
+      throw new Error(
+        `Invalid UpShare configuration at ${configFile}: file is not valid JSON. Run \`upshare logout --all\` to reset it.`,
+        { cause: error }
+      );
+    }
     const result = rawConfigSchema.safeParse(parsed);
     if (!result.success) {
-      throw new Error("Configuration does not match the expected schema.");
+      throw new Error(
+        `Invalid UpShare configuration at ${configFile}: configuration does not match the expected schema. Run \`upshare logout --all\` to reset it.`
+      );
     }
-    return normalizeRawConfig(result.data);
+    const data = normalizeRawConfig(result.data);
+    configCache = {
+      data,
+      file: configFile,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    };
+    return data;
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.startsWith("Invalid UpShare configuration")
+    ) {
+      throw error;
+    }
     throw new Error(
       `Invalid UpShare configuration at ${configFile}. Run \`upshare logout --all\` to reset it.`,
       { cause: error }
@@ -151,20 +261,36 @@ export function loadConfig(): CliConfig {
 function writeConfig(config: CliConfig): void {
   const { configDirectory, configFile } = getConfigPaths();
   fs.mkdirSync(configDirectory, { mode: 0o700, recursive: true });
-  fs.chmodSync(configDirectory, 0o700);
+  // chmodSync is a no-op on Windows (ACL-based permissions); modes only
+  // apply on POSIX. Skip there to avoid confusion.
+  if (process.platform !== "win32") {
+    try {
+      fs.chmodSync(configDirectory, 0o700);
+    } catch {
+      // Intentionally ignored: permission hardening is best-effort.
+    }
+  }
 
-  const payload = rawConfigSchema.parse({
-    ...(config.currentProfile === undefined
-      ? {}
-      : { currentProfile: config.currentProfile }),
-    ...(config.lastUpdateCheck === undefined
-      ? {}
-      : { lastUpdateCheck: config.lastUpdateCheck }),
-    ...(config.latestVersion === undefined
-      ? {}
-      : { latestVersion: config.latestVersion }),
-    ...(config.profiles === undefined ? {} : { profiles: config.profiles }),
-  });
+  let payload: z.infer<typeof rawConfigSchema>;
+  try {
+    payload = rawConfigSchema.parse({
+      ...(config.currentProfile === undefined
+        ? {}
+        : { currentProfile: config.currentProfile }),
+      ...(config.lastUpdateCheck === undefined
+        ? {}
+        : { lastUpdateCheck: config.lastUpdateCheck }),
+      ...(config.latestVersion === undefined
+        ? {}
+        : { latestVersion: config.latestVersion }),
+      ...(config.profiles === undefined ? {} : { profiles: config.profiles }),
+    });
+  } catch (error) {
+    throw new Error(
+      "Invalid UpShare configuration: cannot save an invalid configuration object.",
+      { cause: error }
+    );
+  }
   const temporaryFile = path.join(
     configDirectory,
     `.config-${process.pid}-${Date.now()}.tmp`
@@ -177,49 +303,62 @@ function writeConfig(config: CliConfig): void {
       mode: 0o600,
     });
     fs.renameSync(temporaryFile, configFile);
-    fs.chmodSync(configFile, 0o600);
+    if (process.platform !== "win32") {
+      try {
+        fs.chmodSync(configFile, 0o600);
+      } catch {
+        // Intentionally ignored: permission hardening is best-effort.
+      }
+    }
+    invalidateConfigCache();
   } catch (error) {
     try {
       fs.unlinkSync(temporaryFile);
     } catch {
-      // Ignore cleanup error if temporary file was not created
+      // Intentionally ignored: temp-file cleanup is best-effort.
     }
     throw error;
   }
 }
 
-export function getActiveProfileName(explicit?: string): string {
+export function getActiveProfileName(
+  explicit?: string,
+  cached?: CliConfig
+): string {
   const raw =
     explicit ??
     process.env[PROFILE_ENVIRONMENT_VARIABLE] ??
-    loadConfig().currentProfile ??
+    (cached ?? loadConfig()).currentProfile ??
     DEFAULT_PROFILE;
   return normalizeProfileName(raw);
 }
 
-export function getProfileEntry(profile: string): ProfileConfig | undefined {
-  return loadConfig().profiles?.[normalizeProfileName(profile)];
+export function getProfileEntry(
+  profile: string,
+  cached?: CliConfig
+): ProfileConfig | undefined {
+  return (cached ?? loadConfig()).profiles?.[normalizeProfileName(profile)];
 }
 
-export function listProfileNames(): string[] {
-  return Object.keys(loadConfig().profiles ?? {}).sort();
+export function listProfileNames(cached?: CliConfig): string[] {
+  return Object.keys((cached ?? loadConfig()).profiles ?? {}).sort();
 }
 
 export function getEffectiveApiUrl(
   overrideUrl?: string,
-  profile?: string
+  profile?: string,
+  cached?: CliConfig
 ): string {
   const explicitUrl = overrideUrl || process.env.UPSHARE_API_URL;
   if (explicitUrl) {
     return normalizeApiUrl(explicitUrl);
   }
+  const config = cached ?? loadConfig();
   const name =
     profile === undefined
-      ? getActiveProfileName()
+      ? getActiveProfileName(undefined, config)
       : normalizeProfileName(profile);
-  return normalizeApiUrl(
-    loadConfig().profiles?.[name]?.apiUrl || DEFAULT_API_URL
-  );
+  return normalizeApiUrl(config.profiles?.[name]?.apiUrl || DEFAULT_API_URL);
 }
 
 export interface CommandContext {
@@ -231,8 +370,12 @@ export function resolveCommandContext(options?: {
   apiUrl?: string;
   profile?: string;
 }): CommandContext {
-  const profile = getActiveProfileName(options?.profile);
-  return { apiUrl: getEffectiveApiUrl(options?.apiUrl, profile), profile };
+  const config = loadConfig();
+  const profile = getActiveProfileName(options?.profile, config);
+  return {
+    apiUrl: getEffectiveApiUrl(options?.apiUrl, profile, config),
+    profile,
+  };
 }
 
 export function saveProfile(
@@ -249,15 +392,13 @@ export function saveProfile(
       updates.apiUrl === undefined
         ? existing.apiUrl
         : normalizeApiUrl(updates.apiUrl),
+    ...((updates.keyPrefix ?? existing.keyPrefix)
+      ? { keyPrefix: (updates.keyPrefix ?? existing.keyPrefix) as string }
+      : {}),
+    ...((updates.user ?? existing.user)
+      ? { user: (updates.user ?? existing.user) as ConfigUser }
+      : {}),
   };
-  const keyPrefix = updates.keyPrefix ?? existing.keyPrefix;
-  if (keyPrefix !== undefined) {
-    next.keyPrefix = keyPrefix;
-  }
-  const user = updates.user ?? existing.user;
-  if (user !== undefined) {
-    next.user = user;
-  }
   writeConfig({
     ...config,
     profiles: { ...config.profiles, [name]: next },
@@ -310,39 +451,42 @@ export function clearProfileLogin(profile: string): void {
 export function removeProfileFromConfig(profile: string): void {
   const name = normalizeProfileName(profile);
   const config = loadConfig();
-  if (config.profiles?.[name] === undefined) {
+  const remaining = { ...config.profiles };
+  if (remaining[name] === undefined) {
     throw new Error(`Profile "${name}" not found. Nothing to remove.`);
   }
-  const { [name]: _removed, ...remaining } = config.profiles;
-  let { currentProfile } = config;
+  delete remaining[name];
+  const { currentProfile: activeProfile } = config;
+  let currentProfile = activeProfile;
   if (currentProfile === name) {
     currentProfile =
       remaining[DEFAULT_PROFILE] === undefined
         ? Object.keys(remaining).sort()[0]
         : DEFAULT_PROFILE;
   }
-  const next: CliConfig = {
-    ...config,
-    ...(currentProfile === undefined
-      ? { currentProfile: undefined }
-      : { currentProfile }),
-    ...(Object.keys(remaining).length === 0
-      ? { profiles: undefined }
-      : { profiles: remaining }),
-  };
-  const cleaned: CliConfig = Object.fromEntries(
-    Object.entries(next).filter(([, value]) => value !== undefined)
-  ) as CliConfig;
+  const next: CliConfig = { ...config };
+  if (currentProfile === undefined) {
+    // biome-ignore lint/performance/noDelete: removing optional key so JSON omits it
+    delete next.currentProfile;
+  } else {
+    next.currentProfile = currentProfile;
+  }
+  if (Object.keys(remaining).length === 0) {
+    // biome-ignore lint/performance/noDelete: removing optional key so JSON omits it
+    delete next.profiles;
+  } else {
+    next.profiles = remaining;
+  }
   if (
-    cleaned.profiles === undefined &&
-    cleaned.currentProfile === undefined &&
-    cleaned.lastUpdateCheck === undefined &&
-    cleaned.latestVersion === undefined
+    next.profiles === undefined &&
+    next.currentProfile === undefined &&
+    next.lastUpdateCheck === undefined &&
+    next.latestVersion === undefined
   ) {
     clearConfig();
     return;
   }
-  writeConfig(cleaned);
+  writeConfig(next);
 }
 
 export function clearConfig(): void {
@@ -355,5 +499,7 @@ export function clearConfig(): void {
     ) {
       throw error;
     }
+  } finally {
+    invalidateConfigCache();
   }
 }

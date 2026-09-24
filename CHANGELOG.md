@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.0.21] - 2026-09-24
+
+### Added
+- **`list --json`**: machine-readable JSON output for scripting (merges all pages with `--all`).
+- **Typed file IDs**: `f_`-prefixed file IDs (`f_` + 21-char nanoid) for deterministic share/file routing. Share tokens stay bare and short for URLs.
+- **Legacy ID fallback**: bare 21-char file IDs (pre-backfill saves, scripts, `upload-state.json`) resolve via one `f_+bare` retry; server accepts both during the compat window.
+- **409 finalize retry**: `upload-complete` 409 `in_progress` honors `Retry-After` (cap 30s, 3 attempts); `invalid_state` still fails fast.
+
+### Changed
+- **BREAKING**: bare `upshare --api-url <url>` no longer silently persists to the profile; it errors with a hint to `profile add <name> --api-url <url>`.
+- **BREAKING**: `--all` and `--page` are now strictly mutually exclusive for `list` (previously `--all --page 1` was allowed).
+- **BREAKING**: `profile list/use/show/remove` now error on `--api-url`/`--profile` instead of silently ignoring them (`profile add` still honors `--api-url`).
+- **BREAKING**: `share`/`extend` no longer send `extendMasterFile: true`; file expiry is left alone to match the web UI.
+- Upload `--concurrency` is `1-16` (was briefly `1-32`); the server caps part-URL batches at 16.
+- Share/extend `--duration` minimum is `0.5h` to match the server (file retention `--hours` stays `1-168`).
+- `download` routing is prefix-based (`f_...` → file path first, else share-token first) instead of length-guessing; happy path stays one request.
+- Device-auth verification URLs enforce `https` (localhost `http` allowed) + `/cli/authorize` pathname; a differing origin (app URL vs `--api-url`) warns instead of throwing.
+- Health check simplified to ok/unreachable against `/api/health`; accepts `status` or `state` check shapes.
+- Status `finalizing` and all six list sorts accepted instead of throwing “unexpected response”.
+
+### Fixed
+- Upload stream errors forwarded (no 6h hang); single-part retries refresh signed URLs; refresh failures retried; empty part-URL guarded.
+- Download resume corruption reports exact paths with `--force` restart; chunk-size drift warns and restarts; EXDEV/ENOTSUP/EPERM fallback cleans truncated dest; journal close can’t mask real errors.
+- Abort: pure target resolver, first-page quota snapshot, 100-page cap, batched parallel deletes with per-ID reasons, sanitized names.
+- Shared confirm prompt (`delete`/`abort`/`profile remove`): non-TTY demands `--yes`, Ctrl+C exits 130.
+- Manage: link creation disclosed and confirmed, looped pagination, `getFile()` lookup, typo re-prompts.
+- Login: unicode/ctrl-key handling, loud non-TTY echo warning, no hardcoded `✓`. Signup no longer blocked by `UPSHARE_API_KEY`. Logout no false-failure probe, canonical key format with error reasons.
+- Keys prefix match requires 4+ chars; ambiguous matches reported distinctly; dropped `this` alias.
+- Rename validates length/controls client-side; info no longer swallows auth/network as “retry upload”; share/extend deduped via helper.
+- Upgrade detects `dlx`/`bunx`/Volta/Yarn Berry correctly with explicit npm priority; 404 vs offline distinguished.
+- Config loads once per resolution, skips single bad profiles, specific error kinds; credentials lazily cached; `slow_down` capped; zero-byte progress/`NaN%` guards; strict duration/integer parsing.
+- Ranged downloads use loop workers with 120s chunk timeouts and `.part` preflight; journals cap at 10MB and only drop provably-torn tails.
+
 ## [0.0.20] - 2026-09-24
 
 ### Added

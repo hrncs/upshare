@@ -1,15 +1,14 @@
 import pc from "picocolors";
 import { z } from "zod";
-import { loadConfig, saveGlobal } from "./config";
+import { loadConfig, saveGlobal, VERSION_PATTERN } from "./config";
 
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const FAILURE_RETRY_MS = 60 * 60 * 1000;
 const UPDATE_CHECK_TIMEOUT_MS = 800;
 const NPM_REGISTRY_BASE_URL = "https://registry.npmjs.org/upshare";
 const NPM_REGISTRY_URL = `${NPM_REGISTRY_BASE_URL}/latest`;
 const registryResponseSchema = z.object({ version: z.string() });
 
-const VERSION_PATTERN =
-  /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 const NUMERIC_PATTERN = /^\d+$/;
 
 interface ParsedVersion {
@@ -25,9 +24,9 @@ function parseVersion(value: string): ParsedVersion | null {
     return null;
   }
   return {
-    major: Number.parseInt(match[1] ?? "0", 10),
-    minor: Number.parseInt(match[2] ?? "0", 10),
-    patch: Number.parseInt(match[3] ?? "0", 10),
+    major: Number.parseInt(match[1], 10),
+    minor: Number.parseInt(match[2], 10),
+    patch: Number.parseInt(match[3], 10),
     prerelease:
       match[4] === undefined
         ? null
@@ -40,13 +39,7 @@ function parseVersion(value: string): ParsedVersion | null {
 }
 
 function compareNumbers(a: number, b: number): number {
-  if (a < b) {
-    return -1;
-  }
-  if (a > b) {
-    return 1;
-  }
-  return 0;
+  return Math.sign(a - b);
 }
 
 function comparePrereleaseIdentifiers(
@@ -140,7 +133,9 @@ function isTruthyEnv(value: string | undefined): boolean {
 }
 
 export function isUpdateCheckDisabled(argv: string[] = process.argv): boolean {
-  if (argv.includes("--no-update-check")) {
+  const separator = argv.indexOf("--");
+  const head = separator === -1 ? argv : argv.slice(0, separator);
+  if (head.includes("--no-update-check")) {
     return true;
   }
   return isTruthyEnv(process.env.UPSHARE_NO_UPDATE_CHECK);
@@ -150,23 +145,52 @@ export function shouldSkipUpdateCheck(argv: string[] = process.argv): boolean {
   if (isUpdateCheckDisabled(argv)) {
     return true;
   }
-  const ci = process.env.CI?.trim().toLowerCase();
-  if (ci && ci !== "0" && ci !== "false") {
+  if (isTruthyEnv(process.env.CI)) {
     return true;
   }
-  if (process.stdout.isTTY === false) {
+  if (!process.stdout.isTTY) {
     return true;
   }
   return false;
+}
+
+async function fetchRegistryVersion(
+  url: string,
+  timeoutMs: number
+): Promise<{ status: number; version?: string }> {
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const status = res.status ?? (res.ok ? 200 : 500);
+  if (!res.ok) {
+    return { status };
+  }
+  const parsed = registryResponseSchema.safeParse(await res.json());
+  return {
+    status,
+    ...(parsed.success ? { version: parsed.data.version } : {}),
+  };
+}
+
+function recordCheck(now: number, latest?: string): void {
+  try {
+    saveGlobal({
+      lastUpdateCheck: now,
+      ...(latest === undefined ? {} : { latestVersion: latest }),
+    });
+  } catch {
+    // Intentionally ignored: cache write is best-effort.
+  }
 }
 
 export async function checkForUpdate(
   currentVersion: string,
   timeoutMs = UPDATE_CHECK_TIMEOUT_MS
 ): Promise<string | null> {
+  const now = Date.now();
   try {
     const config = loadConfig();
-    const now = Date.now();
 
     if (
       config.lastUpdateCheck &&
@@ -181,29 +205,23 @@ export async function checkForUpdate(
       return null;
     }
 
-    const res = await fetch(NPM_REGISTRY_URL, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-
-    if (!res.ok) {
+    let fetched: { status: number; version?: string };
+    try {
+      fetched = await fetchRegistryVersion(NPM_REGISTRY_URL, timeoutMs);
+    } catch {
+      recordCheck(now - CHECK_INTERVAL_MS + FAILURE_RETRY_MS);
       return null;
     }
 
-    const parsed = registryResponseSchema.safeParse(await res.json());
-    const latest = parsed.success ? parsed.data.version : undefined;
-
-    if (latest) {
-      saveGlobal({
-        lastUpdateCheck: now,
-        latestVersion: latest,
-      });
-
-      if (isUpdateAvailable(currentVersion, latest)) {
-        return latest;
-      }
+    if (fetched.status !== 200 || !fetched.version) {
+      recordCheck(now - CHECK_INTERVAL_MS + FAILURE_RETRY_MS);
+      return null;
     }
 
+    recordCheck(now, fetched.version);
+    if (isUpdateAvailable(currentVersion, fetched.version)) {
+      return fetched.version;
+    }
     return null;
   } catch {
     return null;
@@ -214,12 +232,12 @@ export async function fetchDistTagVersion(
   tag: string,
   timeoutMs = 10_000
 ): Promise<string | null> {
-  let res: Response;
+  let fetched: { status: number; version?: string };
   try {
-    res = await fetch(`${NPM_REGISTRY_BASE_URL}/${tag}`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    fetched = await fetchRegistryVersion(
+      `${NPM_REGISTRY_BASE_URL}/${tag}`,
+      timeoutMs
+    );
   } catch (error) {
     throw new Error(
       "Couldn't reach the update registry. Check your connection.",
@@ -228,22 +246,13 @@ export async function fetchDistTagVersion(
       }
     );
   }
-  if (res.status === 404) {
+  if (fetched.status === 404) {
     return null;
   }
-  if (!res.ok) {
-    throw new Error(`Update registry responded with HTTP ${res.status}.`);
+  if (fetched.status !== 200) {
+    throw new Error(`Update registry responded with HTTP ${fetched.status}.`);
   }
-  let payload: unknown;
-  try {
-    payload = await res.json();
-  } catch (error) {
-    throw new Error("Update registry returned an invalid response.", {
-      cause: error,
-    });
-  }
-  const parsed = registryResponseSchema.safeParse(payload);
-  return parsed.success ? parsed.data.version : null;
+  return fetched.version ?? null;
 }
 
 export function fetchLatestVersion(timeoutMs = 10_000): Promise<string | null> {

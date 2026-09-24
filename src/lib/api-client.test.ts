@@ -292,6 +292,42 @@ describe("single file lookup", () => {
     );
   });
 
+  it("passes f_-prefixed file ids through unchanged", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fileId = `f_${"a".repeat(21)}`;
+    const fetchMock = vi.fn((_url: string | URL | Request) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            file: {
+              createdAt: "2026-09-06T00:00:00.000Z",
+              expiresAt: "2026-09-07T00:00:00.000Z",
+              fileName: "report.pdf",
+              fileSize: 123,
+              id: fileId,
+              mimeType: "application/pdf",
+              status: "active",
+            },
+            shareLink: null,
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          }
+        )
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    await expect(client.getFile(fileId)).resolves.toMatchObject({
+      file: { id: fileId },
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://upshare.app/api/files/${encodeURIComponent(fileId)}`
+    );
+  });
+
   it("returns null when the endpoint is missing or the file is gone", async () => {
     process.env.UPSHARE_API_KEY = "ups_ci_secret";
     for (const status of [404, 405]) {
@@ -384,5 +420,343 @@ describe("completeUpload retries", () => {
     expect(result).toMatchObject({ file: { id: "file-id" } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
+  });
+
+  it("retries 409 in_progress honoring Retry-After, then succeeds", async () => {
+    vi.useFakeTimers();
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error:
+              "This upload is already being finalized. Please retry shortly.",
+          }),
+          {
+            headers: {
+              "Content-Type": "application/json",
+              "Retry-After": "5",
+            },
+            status: 409,
+          }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            file: {
+              createdAt: "2026-09-07T00:00:00.000Z",
+              expiresAt: "2026-09-08T00:00:00.000Z",
+              fileName: "test.bin",
+              fileSize: 1024,
+              id: "file-id",
+              mimeType: "application/octet-stream",
+              status: "active",
+            },
+            shareLink: null,
+            success: true,
+          }),
+          { headers: { "Content-Type": "application/json" }, status: 200 }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    const promise = client.completeUpload("file-id");
+
+    await vi.advanceTimersByTimeAsync(5000);
+    const result = await promise;
+
+    expect(result).toMatchObject({ file: { id: "file-id" } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("fails fast on 409 invalid_state without retrying", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: "This upload cannot be finalized in its current state.",
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 409,
+          }
+        )
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    await expect(client.completeUpload("file-id")).rejects.toThrow(
+      "This upload cannot be finalized in its current state."
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resolveDownload fallback", () => {
+  const downloadPayload = {
+    downloadUrl: "https://storage.example/file",
+    expiresAt: "2026-09-06T00:00:00.000Z",
+    fileId: "file-id",
+    fileName: "report.pdf",
+    fileSize: 123,
+    mimeType: "application/pdf",
+  };
+
+  it("tries the token endpoint first and falls back to fileId", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("nope", { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(downloadPayload), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    // 21-char bare share id: must still attempt the token path first.
+    const longId = "a".repeat(21);
+    const result = await client.resolveDownload(longId);
+
+    expect(result).toMatchObject({ fileName: "report.pdf" });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://upshare.app/api/files/download?token=${longId}`
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      `https://upshare.app/api/files/download?fileId=${longId}`
+    );
+  });
+
+  it("costs a single request when the token endpoint succeeds", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, _init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify(downloadPayload), {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          })
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    await client.resolveDownload("https://upshare.app/s/abcdef1234567890");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("?token=");
+  });
+
+  it("tries fileId first for f_-prefixed ids with a single request", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fileId = `f_${"a".repeat(21)}`;
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, _init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify(downloadPayload), {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          })
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    const result = await client.resolveDownload(fileId);
+
+    expect(result).toMatchObject({ fileName: "report.pdf" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://upshare.app/api/files/download?fileId=${encodeURIComponent(fileId)}`
+    );
+  });
+
+  it("falls back to token when fileId-first misses for f_-prefixed ids", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fileId = `f_${"a".repeat(21)}`;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("nope", { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(downloadPayload), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    const result = await client.resolveDownload(fileId);
+
+    expect(result).toMatchObject({ fileName: "report.pdf" });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://upshare.app/api/files/download?fileId=${encodeURIComponent(fileId)}`
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      `https://upshare.app/api/files/download?token=${encodeURIComponent(fileId)}`
+    );
+  });
+
+  it("resolves a bare share token via the token endpoint in one request", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const token = "abcdef1234567890";
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, _init?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify(downloadPayload), {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          })
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    await client.resolveDownload(token);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://upshare.app/api/files/download?token=${token}`
+    );
+  });
+
+  it("retries a bare 21-char id once as f_-prefixed fileId after dual 404", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const bare = "b".repeat(21);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("nope", { status: 404 }))
+      .mockResolvedValueOnce(new Response("nope", { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(downloadPayload), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    const result = await client.resolveDownload(bare);
+
+    expect(result).toMatchObject({ fileName: "report.pdf" });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      `https://upshare.app/api/files/download?token=${bare}`
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      `https://upshare.app/api/files/download?fileId=${bare}`
+    );
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe(
+      `https://upshare.app/api/files/download?fileId=${encodeURIComponent(`f_${bare}`)}`
+    );
+  });
+
+  it("does not legacy-retry when either qualified attempt is non-404", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const bare = "c".repeat(21);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("denied", { status: 403 }))
+      .mockResolvedValueOnce(new Response("denied", { status: 403 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    await expect(client.resolveDownload(bare)).rejects.toThrow(
+      "Download resolution failed (403)"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("share body contract", () => {
+  it("omits extendMasterFile to match web behavior", async () => {
+    process.env.UPSHARE_API_KEY = "ups_ci_secret";
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, _init?: RequestInit) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              capped: false,
+              expiresAt: "2026-09-07T00:00:00.000Z",
+              fileExpiresAt: "2026-09-08T00:00:00.000Z",
+              fileId: "file-1",
+              id: "share-1",
+              shareUrl: "https://upshare.app/s/abcdef1234567890",
+              token: "abcdef1234567890",
+            }),
+            { headers: { "Content-Type": "application/json" }, status: 200 }
+          )
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+    await client.createShare("file-1", 24);
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body).toEqual({ durationHours: 24 });
+    expect(body).not.toHaveProperty("extendMasterFile");
+  });
+});
+
+describe("device verification origin relaxation", () => {
+  function authorizationPayload(origin: string) {
+    return {
+      device_code: "a".repeat(43),
+      expires_in: 600,
+      interval: 5,
+      user_code: "ABCD-EFGH-JKMN-PQRS",
+      verification_uri: `${origin}/cli/authorize`,
+      verification_uri_complete: `${origin}/cli/authorize?user_code=ABCD-EFGH-JKMN-PQRS`,
+    };
+  }
+
+  it("warns instead of throwing when the app origin differs", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify(authorizationPayload("https://app.example.com")),
+            { headers: { "Content-Type": "application/json" }, status: 200 }
+          )
+        )
+      )
+    );
+    const client = new ApiClient({ apiUrl: "https://api.example.com" });
+
+    const result = await client.requestDeviceAuthorization();
+
+    expect(result.verification_uri).toBe(
+      "https://app.example.com/cli/authorize"
+    );
+    expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("still rejects non-https verification URLs", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify(authorizationPayload("http://upshare.app")),
+            { headers: { "Content-Type": "application/json" }, status: 200 }
+          )
+        )
+      )
+    );
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+
+    await expect(client.requestDeviceAuthorization()).rejects.toThrow(
+      "untrusted verification URL"
+    );
   });
 });

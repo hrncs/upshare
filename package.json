@@ -1,6 +1,6 @@
 {
   "name": "upshare",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "description": "Official CLI for UpShare — upload, download, and manage your files securely via API key.",
   "keywords": [
     "upshare",
@@ -23,21 +23,21 @@
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "upshare": "dist/index.js"
+    "upshare": "./dist/index.js"
   },
   "files": [
     "dist",
     "README.md",
     "CHANGELOG.md",
-    "SECURITY.md"
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsdown",
     "check": "ultracite check",
     "check-types": "tsc --noEmit",
     "fix": "ultracite fix",
-    "format": "biome format --write",
-    "lint": "biome check",
+    "format": "biome format --write .",
+    "lint": "biome check .",
     "prepublishOnly": "pnpm check && pnpm check-types && pnpm test && pnpm build",
     "test": "vitest run"
   },

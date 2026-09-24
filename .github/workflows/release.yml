@@ -29,7 +29,7 @@ jobs:
       - name: Check version against npm
         id: version
         run: |
-          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          LOCAL_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('./package.json','utf8')).version")
           REMOTE_VERSION=$(npm view upshare version 2>/dev/null || echo "0.0.0")
           echo "local=$LOCAL_VERSION remote=$REMOTE_VERSION"
           if [ "$LOCAL_VERSION" = "$REMOTE_VERSION" ]; then

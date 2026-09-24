@@ -124,7 +124,22 @@ describe("isUpdateCheckDisabled", () => {
     expect(
       isUpdateCheckDisabled(["node", "upshare", "--no-update-check"])
     ).toBe(true);
+    expect(
+      isUpdateCheckDisabled(["node", "upshare", "upload", "--no-update-check"])
+    ).toBe(true);
     expect(isUpdateCheckDisabled(["node", "upshare", "upload"])).toBe(false);
+  });
+
+  it("ignores --no-update-check after the -- terminator", () => {
+    expect(
+      isUpdateCheckDisabled([
+        "node",
+        "upshare",
+        "upload",
+        "--",
+        "--no-update-check",
+      ])
+    ).toBe(false);
   });
 
   it("is disabled via environment variable", () => {

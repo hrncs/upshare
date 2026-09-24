@@ -1,5 +1,8 @@
 import { stripVTControlCharacters } from "node:util";
 
+// biome-ignore lint/performance/noBarrelFile: back-compat re-export so existing `format` imports keep working
+export { cleanIdentifier } from "./identifiers";
+
 export function sanitizeTerminalText(value: string): string {
   return [...stripVTControlCharacters(value)]
     .filter((character) => {
@@ -13,10 +16,19 @@ export function formatBytes(bytes: number, decimals = 2): string {
   if (bytes === 0) {
     return "0 B";
   }
+  if (!Number.isFinite(bytes)) {
+    return "?";
+  }
+  if (bytes < 0) {
+    throw new Error("Bytes must be a non-negative finite number.");
+  }
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const i = Math.min(
+    sizes.length - 1,
+    Math.floor(Math.log(bytes) / Math.log(k))
+  );
   return `${Number.parseFloat((bytes / k ** i).toFixed(dm))} ${sizes[i]}`;
 }
 
@@ -36,6 +48,9 @@ export function formatDuration(totalSeconds: number): string {
 
 export function formatRelativeTime(dateInput: string | Date): string {
   const target = new Date(dateInput).getTime();
+  if (Number.isNaN(target)) {
+    return "expired";
+  }
   const now = Date.now();
   const diffMs = target - now;
 
@@ -87,17 +102,4 @@ export function formatAge(dateInput: string | Date): string {
     return `${months}mo ago`;
   }
   return `${Math.floor(months / 12)}y ago`;
-}
-
-const TOKEN_DELIMITER_REGEX = /[?#]/;
-const TRAILING_SLASHES_REGEX = /\/+$/;
-
-export function cleanIdentifier(target: string): string {
-  const trimmed = target.trim().replace(TRAILING_SLASHES_REGEX, "");
-  if (trimmed.includes("/s/")) {
-    const part = trimmed.split("/s/").pop();
-    const token = part ? part.split(TOKEN_DELIMITER_REGEX)[0] : trimmed;
-    return token.replace(TRAILING_SLASHES_REGEX, "");
-  }
-  return trimmed;
 }

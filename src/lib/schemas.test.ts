@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   downloadResponseSchema,
+  fileIdSchema,
   healthResponseSchema,
   listFilesResponseSchema,
   multipartResumeResponseSchema,
@@ -29,6 +30,19 @@ describe("downloadResponseSchema", () => {
       ).toBe(false);
     }
   );
+});
+
+describe("fileIdSchema", () => {
+  it("accepts f_-prefixed and legacy bare 21-char ids", () => {
+    expect(fileIdSchema.safeParse(`f_${"a".repeat(21)}`).success).toBe(true);
+    expect(fileIdSchema.safeParse("a".repeat(21)).success).toBe(true);
+  });
+
+  it("rejects empty and malformed ids", () => {
+    expect(fileIdSchema.safeParse("").success).toBe(false);
+    expect(fileIdSchema.safeParse("file-1").success).toBe(false);
+    expect(fileIdSchema.safeParse(`f_${"a".repeat(20)}`).success).toBe(false);
+  });
 });
 
 describe("healthResponseSchema", () => {
@@ -60,9 +74,76 @@ describe("healthResponseSchema", () => {
     });
     expect(result.checks?.storage.latencyMs).toBeUndefined();
   });
+
+  it("accepts ready-style checks keyed by state", () => {
+    const result = healthResponseSchema.parse({
+      checks: {
+        database: { latencyMs: 3, state: "ok" },
+        storage: { state: "unavailable" },
+      },
+      status: "unavailable",
+    });
+    expect(result.checks?.database.state).toBe("ok");
+    expect(result.checks?.storage.status).toBeUndefined();
+  });
 });
 
 describe("listFilesResponseSchema", () => {
+  it("accepts every server sort echo", () => {
+    for (const sort of [
+      "newest",
+      "oldest",
+      "largest",
+      "smallest",
+      "shared",
+      "unshared",
+    ]) {
+      const result = listFilesResponseSchema.safeParse({
+        files: [],
+        hasMore: false,
+        page: 1,
+        pageSize: 20,
+        quota: {
+          maxQuotaBytes: 1000,
+          periodKey: "2026-09",
+          reservedBytes: 0,
+          usedBytes: 0,
+        },
+        sort,
+        totalFiles: 0,
+      });
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it("accepts the finalizing status without crashing", () => {
+    const result = listFilesResponseSchema.safeParse({
+      files: [
+        {
+          createdAt: "2026-09-06T00:00:00.000Z",
+          expiresAt: "2026-09-07T00:00:00.000Z",
+          fileName: "half.bin",
+          fileSize: 64,
+          id: "file-1",
+          mimeType: "application/octet-stream",
+          shareLink: null,
+          status: "finalizing",
+        },
+      ],
+      hasMore: false,
+      page: 1,
+      pageSize: 20,
+      quota: {
+        maxQuotaBytes: 1000,
+        periodKey: "2026-09",
+        reservedBytes: 0,
+        usedBytes: 0,
+      },
+      sort: "newest",
+      totalFiles: 1,
+    });
+    expect(result.success).toBe(true);
+  });
   it("does not expose server-only storage fields", () => {
     const result = listFilesResponseSchema.parse({
       files: [

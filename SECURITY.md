@@ -2,12 +2,12 @@
 
 ## Supported Versions
 
-Only the latest release of UpShare CLI receives active security patches.
+Only the latest release receives security patches.
 
-| Version   | Supported |
-| --------- | --------- |
-| >= 0.0.18 | Yes       |
-| < 0.0.18  | No        |
+| Version  | Supported |
+| -------- | --------- |
+| 0.0.21   | Yes       |
+| < 0.0.21 | No        |
 
 ## Reporting a Vulnerability
 

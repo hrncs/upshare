@@ -2,38 +2,31 @@ import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
 import { cleanIdentifier, formatRelativeTime } from "../lib/format";
 import { printError, printFields, printWarning } from "../lib/output";
-import { createSpinner } from "../lib/spinner";
-import { parseDurationHours } from "../lib/validation";
+import { resolveShareTarget, startShareSpinner } from "../lib/share-helpers";
 
 export async function shareCommand(
   target: string,
   options?: { apiUrl?: string; duration?: string; profile?: string }
 ): Promise<void> {
-  const id = cleanIdentifier(target);
-  if (!id) {
-    printError("File identifier or share token is required.");
-    process.exitCode = 1;
-    return;
-  }
-
-  let durationHours: number;
+  let resolved: ReturnType<typeof resolveShareTarget>;
   try {
-    durationHours = parseDurationHours(options?.duration, 24, 0.5);
+    resolved = resolveShareTarget(target, options);
   } catch (error) {
     printError(error instanceof Error ? error.message : "Invalid duration");
     process.exitCode = 1;
     return;
   }
 
-  const client = new ApiClient({
-    apiUrl: options?.apiUrl,
-    profile: options?.profile,
-  });
-  const spinner = createSpinner(`Generating share link for '${id}'...`).start();
+  const spinner = startShareSpinner(
+    `Generating share link for '${resolved.id}'...`
+  );
 
   try {
-    const result = await client.createShare(id, durationHours);
-    spinner.succeed(`Share link created for ${result.fileName || id}`);
+    const result = await resolved.client.createShare(
+      resolved.id,
+      resolved.durationHours
+    );
+    spinner.succeed(`Share link created for ${result.fileName || resolved.id}`);
 
     console.log();
     printFields([
@@ -73,9 +66,9 @@ export async function revokeCommand(
     apiUrl: options?.apiUrl,
     profile: options?.profile,
   });
-  const spinner = createSpinner(
+  const spinner = startShareSpinner(
     `Revoking public share link for '${id}'...`
-  ).start();
+  );
 
   try {
     await client.revokeShare(id);

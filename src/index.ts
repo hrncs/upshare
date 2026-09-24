@@ -25,17 +25,11 @@ import { statusCommand } from "./commands/status";
 import { upgradeCommand } from "./commands/upgrade";
 import { uploadCommand } from "./commands/upload";
 import { whoamiCommand } from "./commands/whoami";
-import {
-  getActiveProfileName,
-  normalizeApiUrl,
-  saveProfile,
-} from "./lib/config";
-import { printError, printWarning } from "./lib/output";
+import { printError } from "./lib/output";
 import { type SuggestableCommand, suggestCommand } from "./lib/suggest";
 import {
   checkForUpdate,
   printUpdateBanner,
-  printVersionWithUpdateCheck,
   shouldSkipUpdateCheck,
 } from "./lib/update-check";
 
@@ -43,6 +37,43 @@ const CURRENT_VERSION = packageJson.version;
 const program = new Command();
 const defaultHelp = new Help();
 let upgradedThisRun = false;
+
+interface GlobalOptions {
+  apiUrl?: string;
+  profile?: string;
+}
+
+function resolveGlobals(cmdOptions: GlobalOptions): GlobalOptions {
+  const globals = program.opts();
+  return {
+    apiUrl: cmdOptions.apiUrl || globals.apiUrl,
+    profile: cmdOptions.profile || globals.profile,
+  };
+}
+
+function rejectGlobalOverrides(
+  subcommand: string,
+  options: { checkApiUrl?: boolean; checkProfile?: boolean } = {}
+): boolean {
+  const { checkApiUrl = true, checkProfile = true } = options;
+  const globals = program.opts();
+  const flags: string[] = [];
+  if (checkApiUrl && globals.apiUrl) {
+    flags.push("--api-url");
+  }
+  if (checkProfile && globals.profile) {
+    flags.push("--profile");
+  }
+  if (flags.length === 0) {
+    return false;
+  }
+  printError(
+    `${subcommand} does not accept global ${flags.join(" / ")}.`,
+    `Run without ${flags.join(" ")} or use a command that accepts it.`
+  );
+  process.exitCode = 1;
+  return true;
+}
 
 function formatSection(
   title: string,
@@ -78,12 +109,12 @@ program
         ["signup", "Create an account via browser and save the API key"],
         ["login", "Log in with API key, or --web for browser"],
         ["keys", "List API keys for this account"],
-        ["keys rename", "Rename an API key by id, prefix, or name"],
+        ["keys rename", "Rename an API key by id, prefix, name, or current"],
         ["profile", "Manage configuration profiles"],
         ["profile list", "List all profiles"],
         ["profile use", "Switch the active profile"],
         ["whoami", "Show current account information"],
-        ["logout", "Clear stored API credentials"],
+        ["logout", "Clear stored API credentials for the active profile"],
       ];
 
       const fileCommands: [string, string][] = [
@@ -92,9 +123,9 @@ program
         ["list, ls", "List active files and monthly upload usage"],
         ["info <target>", "Show full details for one file"],
         ["rename <target> <name>", "Rename an uploaded file"],
-        ["abort [target]", "Abort unfinished upload(s) and free pending space"],
+        ["abort [target]", "Abort unfinished uploads and free pending space"],
         ["delete, rm <target>", "Permanently delete an uploaded file"],
-        ["manage, files", "Interactive file management menu"],
+        ["manage, files [target]", "Interactive file management menu"],
       ];
 
       const shareCommands: [string, string][] = [
@@ -150,6 +181,7 @@ program
   .option("--no-browser", "Print the URL instead of opening a browser")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (cmdOptions: {
       apiUrl?: string;
@@ -157,9 +189,7 @@ program
       profile?: string;
       web?: boolean;
     }) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       if (cmdOptions.web) {
         await signupCommand({
           apiUrl,
@@ -183,6 +213,7 @@ program
   .description("Create an account via browser and save the API key")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .option("--no-browser", "Print the URL instead of opening a browser")
   .action(
     async (cmdOptions: {
@@ -190,9 +221,7 @@ program
       browser?: boolean;
       profile?: string;
     }) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await signupCommand({
         apiUrl,
         mode: "signup",
@@ -207,10 +236,9 @@ program
   .description("Show current account information")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(async (cmdOptions: { apiUrl?: string; profile?: string }) => {
-    const options = program.opts();
-    const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-    const profile = cmdOptions.profile || options.profile;
+    const { apiUrl, profile } = resolveGlobals(cmdOptions);
     await whoamiCommand({ apiUrl, profile });
   });
 
@@ -219,10 +247,9 @@ const keysCommand = program
   .description("List API keys for this account")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(async (cmdOptions: { apiUrl?: string; profile?: string }) => {
-    const options = program.opts();
-    const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-    const profile = cmdOptions.profile || options.profile;
+    const { apiUrl, profile } = resolveGlobals(cmdOptions);
     await listKeysCommand({ apiUrl, profile });
   });
 
@@ -231,15 +258,14 @@ keysCommand
   .description("Rename an API key by id, prefix, name, or `current`")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       key: string,
       name: string,
       cmdOptions: { apiUrl?: string; profile?: string }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await renameKeyCommand(key, name, { apiUrl, profile });
     }
   );
@@ -260,6 +286,7 @@ program
   )
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       file: string,
@@ -273,9 +300,7 @@ program
         shareDuration?: string;
       }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await uploadCommand(file, {
         apiUrl,
         concurrency: cmdOptions.concurrency,
@@ -297,6 +322,7 @@ program
   .option("-f, --force", "Overwrite existing destination file")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string,
@@ -309,9 +335,7 @@ program
         retries: string;
       }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await downloadCommand(target, {
         apiUrl,
         concurrency: cmdOptions.concurrency,
@@ -327,25 +351,27 @@ program
   .command("list")
   .alias("ls")
   .description("List active files and monthly upload usage")
-  .option("--page <page>", "Page number", "1")
+  .option("--page <page>", "Page number")
   .option("--all", "List all active files")
   .option("--pending", "List partial uploads holding space")
+  .option("--json", "Output raw JSON for scripting")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (cmdOptions: {
       all?: boolean;
       apiUrl?: string;
-      page: string;
+      json?: boolean;
+      page?: string;
       pending?: boolean;
       profile?: string;
     }) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await listCommand({
         all: cmdOptions.all,
         apiUrl,
+        json: cmdOptions.json,
         page: cmdOptions.page,
         pending: cmdOptions.pending,
         profile,
@@ -358,14 +384,13 @@ program
   .description("Show full details for one file")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string,
       cmdOptions: { apiUrl?: string; profile?: string }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await infoCommand(target, { apiUrl, profile });
     }
   );
@@ -375,19 +400,18 @@ program
   .description("Create or retrieve a public share link for a file")
   .option(
     "-d, --duration <hours>",
-    "Share link expiration in hours (1-168)",
+    "Share link expiration in hours (0.5-168)",
     "24"
   )
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string,
       cmdOptions: { apiUrl?: string; duration?: string; profile?: string }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await shareCommand(target, {
         apiUrl,
         duration: cmdOptions.duration,
@@ -401,19 +425,18 @@ program
   .description("Extend the share link duration for a file")
   .option(
     "-d, --duration <hours>",
-    "New share duration from now in hours (1-168)",
+    "New share duration from now in hours (0.5-168)",
     "24"
   )
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string,
       cmdOptions: { apiUrl?: string; duration?: string; profile?: string }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await extendCommand(target, {
         apiUrl,
         duration: cmdOptions.duration,
@@ -427,14 +450,13 @@ program
   .description("Revoke a public share link (makes file private)")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string,
       cmdOptions: { apiUrl?: string; profile?: string }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await revokeCommand(target, { apiUrl, profile });
     }
   );
@@ -444,15 +466,14 @@ program
   .description("Rename an uploaded file")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string,
       name: string,
       cmdOptions: { apiUrl?: string; profile?: string }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await renameCommand(target, name, { apiUrl, profile });
     }
   );
@@ -464,14 +485,13 @@ program
   .option("-y, --yes", "Skip delete confirmation prompt")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string,
       cmdOptions: { apiUrl?: string; profile?: string; yes?: boolean }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await deleteCommand(target, {
         apiUrl,
         profile,
@@ -486,14 +506,13 @@ program
   .option("-y, --yes", "Skip abort confirmation prompt")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string | undefined,
       cmdOptions: { apiUrl?: string; profile?: string; yes?: boolean }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await abortCommand(target, { apiUrl, profile, yes: cmdOptions.yes });
     }
   );
@@ -504,14 +523,13 @@ program
   .description("Interactive file management menu")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(
     async (
       target: string | undefined,
       cmdOptions: { apiUrl?: string; profile?: string }
     ) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       await manageCommand(target, { apiUrl, profile });
     }
   );
@@ -521,6 +539,7 @@ program
   .alias("update")
   .description("Upgrade UpShare CLI to the latest version")
   .option("--beta", "Upgrade to the latest beta version")
+  .option("--no-update-check", "Skip the background update check")
   .action(async (cmdOptions: { beta?: boolean }) => {
     upgradedThisRun = await upgradeCommand({ beta: cmdOptions.beta });
   });
@@ -530,10 +549,9 @@ program
   .description("Check UpShare API status")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .action(async (cmdOptions: { apiUrl?: string; profile?: string }) => {
-    const options = program.opts();
-    const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-    const profile = cmdOptions.profile || options.profile;
+    const { apiUrl, profile } = resolveGlobals(cmdOptions);
     await statusCommand({ apiUrl, profile });
   });
 
@@ -542,12 +560,11 @@ program
   .description("Clear stored API credentials for the active profile")
   .option("--api-url <url>", "Override UpShare backend API URL")
   .option("-p, --profile <name>", "Use a specific configuration profile")
+  .option("--no-update-check", "Skip the background update check")
   .option("--all", "Remove all profiles and stored credentials")
   .action(
     (cmdOptions: { all?: boolean; apiUrl?: string; profile?: string }) => {
-      const options = program.opts();
-      const apiUrl = cmdOptions.apiUrl || options.apiUrl;
-      const profile = cmdOptions.profile || options.profile;
+      const { apiUrl, profile } = resolveGlobals(cmdOptions);
       logoutCommand({ all: cmdOptions.all, apiUrl, profile });
     }
   );
@@ -559,14 +576,22 @@ const profileCommand = program
 profileCommand
   .command("list")
   .description("List all profiles")
+  .option("--no-update-check", "Skip the background update check")
   .action(() => {
+    if (rejectGlobalOverrides("profile list")) {
+      return;
+    }
     listProfilesCommand();
   });
 
 profileCommand
   .command("use <name>")
   .description("Switch the active profile")
+  .option("--no-update-check", "Skip the background update check")
   .action((name: string) => {
+    if (rejectGlobalOverrides("profile use")) {
+      return;
+    }
     useProfileCommand(name);
   });
 
@@ -574,19 +599,25 @@ profileCommand
   .command("add <name>")
   .description("Add a new profile")
   .option("--api-url <url>", "API URL for the new profile")
+  .option("--no-update-check", "Skip the background update check")
   .action((name: string, cmdOptions: { apiUrl?: string }) => {
-    // NOTE: --api-url duplicates the global flag, so commander may attribute
-    // it to the root program instead of this subcommand. Fall back to it.
-    const options = program.opts();
+    // A global --profile is rejected: it is ambiguous with the name argument.
+    if (rejectGlobalOverrides("profile add", { checkApiUrl: false })) {
+      return;
+    }
     addProfileCommand(name, {
-      apiUrl: cmdOptions.apiUrl || options.apiUrl,
+      apiUrl: resolveGlobals(cmdOptions).apiUrl,
     });
   });
 
 profileCommand
   .command("show [name]")
   .description("Show profile details (defaults to the active profile)")
+  .option("--no-update-check", "Skip the background update check")
   .action((name?: string) => {
+    if (rejectGlobalOverrides("profile show")) {
+      return;
+    }
     showProfileCommand(name);
   });
 
@@ -594,11 +625,18 @@ profileCommand
   .command("remove <name>")
   .description("Remove a profile and its stored credential")
   .option("-y, --yes", "Skip removal confirmation prompt")
+  .option("--no-update-check", "Skip the background update check")
   .action(async (name: string, cmdOptions: { yes?: boolean }) => {
+    if (rejectGlobalOverrides("profile remove")) {
+      return;
+    }
     await removeProfileCommand(name, { yes: cmdOptions.yes });
   });
 
-program.allowExcessArguments();
+program.argument(
+  "[unknown-command]",
+  "Unknown command (used to suggest the intended command)"
+);
 program.action(() => {
   const [unknown] = program.args;
   if (unknown !== undefined) {
@@ -618,9 +656,14 @@ program.action(() => {
     process.exitCode = 1;
     return;
   }
-  const globalApiUrl = program.opts().apiUrl as string | undefined;
-  if (globalApiUrl) {
-    persistGlobalApiUrl(globalApiUrl);
+  const globals = program.opts();
+  if (globals.apiUrl || globals.profile) {
+    printError(
+      "--api-url and --profile are per-run overrides and are not saved.",
+      "upshare profile add <name> --api-url <url>"
+    );
+    console.error("  Run: upshare --help to see all available commands.");
+    process.exitCode = 1;
     return;
   }
   console.log(`
@@ -631,46 +674,14 @@ Run ${pc.cyan("upshare --help")} to see all available commands.
 `);
 });
 
-function persistGlobalApiUrl(rawUrl: string): void {
-  try {
-    const apiUrl = normalizeApiUrl(rawUrl);
-    const profile = getActiveProfileName(program.opts().profile);
-    saveProfile(profile, { apiUrl });
-    console.log();
-    console.log(
-      `${pc.dim(`API URL for profile "${profile}" set to`)} ${pc.cyan(apiUrl)}`
-    );
-    console.log();
-    if (
-      process.env.UPSHARE_API_URL &&
-      normalizeApiUrl(process.env.UPSHARE_API_URL) !== apiUrl
-    ) {
-      printWarning(
-        "UPSHARE_API_URL is set and takes precedence over the saved URL."
-      );
-    }
-  } catch (error) {
-    printError(error instanceof Error ? error.message : "Invalid API URL.");
-    process.exitCode = 1;
-  }
-}
-
 async function run() {
-  // Strip our flag before commander sees it so it works in any position
-  // (e.g. `upshare upload --no-update-check`, not just before the command).
   const rawArgv = process.argv;
-  const argv = rawArgv.filter((arg) => arg !== "--no-update-check");
-  if (argv.slice(2).some((arg) => arg === "-v" || arg === "--version")) {
-    printVersionWithUpdateCheck(CURRENT_VERSION);
-    return;
-  }
-
   const updatePromise = shouldSkipUpdateCheck(rawArgv)
     ? Promise.resolve(null)
     : checkForUpdate(CURRENT_VERSION);
 
   try {
-    await program.parseAsync(argv);
+    await program.parseAsync(rawArgv);
   } catch (err) {
     const isCommanderExit =
       err instanceof CommanderError &&

@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { DEFAULT_PROFILE, getConfigPaths } from "./config";
+import { printWarning } from "./output";
 
 const uploadStateSchema = z.strictObject({
   apiUrl: z.url(),
@@ -17,27 +18,28 @@ const legacyUploadStateSchema = uploadStateSchema.omit({ profile: true });
 export type UploadState = z.infer<typeof uploadStateSchema>;
 export type ExpectedUploadState = Omit<UploadState, "fileId">;
 
+function hashStateKey(parts: string[]): string {
+  const hash = createHash("sha256");
+  for (const [index, part] of parts.entries()) {
+    if (index > 0) {
+      hash.update("\0");
+    }
+    hash.update(part);
+  }
+  return hash.digest("hex");
+}
+
 function getStateFile(
   profile: string,
   apiUrl: string,
   filePath: string
 ): string {
-  const key = createHash("sha256")
-    .update(profile)
-    .update("\0")
-    .update(apiUrl)
-    .update("\0")
-    .update(filePath)
-    .digest("hex");
+  const key = hashStateKey([profile, apiUrl, filePath]);
   return path.join(getConfigPaths().configDirectory, "uploads", `${key}.json`);
 }
 
 function getLegacyStateFile(apiUrl: string, filePath: string): string {
-  const key = createHash("sha256")
-    .update(apiUrl)
-    .update("\0")
-    .update(filePath)
-    .digest("hex");
+  const key = hashStateKey([apiUrl, filePath]);
   return path.join(getConfigPaths().configDirectory, "uploads", `${key}.json`);
 }
 
@@ -53,38 +55,71 @@ function stateMatches(
   );
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: resume-state matching across current/legacy schemas
 function readMatchingState(
   stateFile: string,
   expected: ExpectedUploadState,
   options?: { onInvalidated?: (reason: "modified" | "corrupt") => void }
 ): UploadState | null {
+  let raw: string;
   try {
-    const value: unknown = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-    const parsed = uploadStateSchema.safeParse(value);
-    let state: UploadState | null = null;
-    if (parsed.success === true) {
-      state = parsed.data;
-    } else {
-      const legacyParsed = legacyUploadStateSchema.safeParse(value);
-      if (legacyParsed.success === true) {
-        state = { ...legacyParsed.data, profile: expected.profile };
-      }
-    }
-    if (
-      !(state && stateMatches(state, expected)) ||
-      (parsed.success === true && parsed.data.profile !== expected.profile)
-    ) {
-      fs.unlinkSync(stateFile);
-      options?.onInvalidated?.(state ? "modified" : "corrupt");
-      return null;
-    }
-    return state;
+    raw = fs.readFileSync(stateFile, "utf8");
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       return null;
     }
+    printWarning(
+      `Could not read upload resume state at ${stateFile}: ${error instanceof Error ? error.message : "unknown error"}. Continuing without resume.`
+    );
     return null;
   }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    try {
+      fs.unlinkSync(stateFile);
+    } catch (unlinkError) {
+      if (
+        !(
+          unlinkError instanceof Error &&
+          "code" in unlinkError &&
+          unlinkError.code === "ENOENT"
+        )
+      ) {
+        throw unlinkError;
+      }
+    }
+    options?.onInvalidated?.("corrupt");
+    return null;
+  }
+  const parsed = uploadStateSchema.safeParse(value);
+  let state: UploadState | null = null;
+  if (parsed.success === true) {
+    state = parsed.data;
+  } else {
+    const legacyParsed = legacyUploadStateSchema.safeParse(value);
+    if (legacyParsed.success === true) {
+      state = { ...legacyParsed.data, profile: expected.profile };
+    }
+  }
+  if (
+    !(state && stateMatches(state, expected)) ||
+    (parsed.success === true && parsed.data.profile !== expected.profile)
+  ) {
+    try {
+      fs.unlinkSync(stateFile);
+    } catch (error) {
+      if (
+        !(error instanceof Error && "code" in error && error.code === "ENOENT")
+      ) {
+        throw error;
+      }
+    }
+    options?.onInvalidated?.(state ? "modified" : "corrupt");
+    return null;
+  }
+  return state;
 }
 
 export function loadUploadState(
@@ -108,8 +143,10 @@ export function loadUploadState(
   try {
     saveUploadState(migrated);
     fs.unlinkSync(legacyFile);
-  } catch {
-    // Ignore migration failure; the legacy file remains usable.
+  } catch (error) {
+    printWarning(
+      `Could not migrate legacy upload resume state: ${error instanceof Error ? error.message : "unknown error"}.`
+    );
   }
   return migrated;
 }
@@ -119,20 +156,26 @@ export function saveUploadState(state: UploadState): void {
   const stateDirectory = path.dirname(stateFile);
   fs.mkdirSync(stateDirectory, { mode: 0o700, recursive: true });
   fs.chmodSync(stateDirectory, 0o700);
-  const temporaryFile = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
+  const temporaryFile = `${stateFile}.${process.pid}.${Date.now()}.${randomBytes(8).toString("hex")}.tmp`;
   try {
-    fs.writeFileSync(
-      temporaryFile,
-      `${JSON.stringify(uploadStateSchema.parse(state))}\n`,
-      { encoding: "utf8", flag: "wx", mode: 0o600 }
-    );
+    const descriptor = fs.openSync(temporaryFile, "wx", 0o600);
+    try {
+      fs.writeFileSync(
+        descriptor,
+        `${JSON.stringify(uploadStateSchema.parse(state))}\n`,
+        { encoding: "utf8" }
+      );
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
     fs.renameSync(temporaryFile, stateFile);
     fs.chmodSync(stateFile, 0o600);
   } catch (error) {
     try {
       fs.unlinkSync(temporaryFile);
     } catch {
-      // Ignore cleanup error if temporary file was not created
+      // Intentionally ignored: temp-file cleanup is best-effort.
     }
     throw error;
   }

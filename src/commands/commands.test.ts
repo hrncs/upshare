@@ -143,10 +143,23 @@ beforeEach(() => {
   process.env.UPSHARE_API_KEY = "ups_test_secret";
   delete process.env.UPSHARE_API_URL;
   process.env.npm_config_user_agent = "npm/10.0.0 node/v20.0.0 linux x64";
+  delete process.env.npm_execpath;
+  delete process.env.npm_lifecycle_command;
+  delete process.env.VOLTA_HOME;
   process.argv = ["node", "/usr/local/lib/node_modules/upshare/dist/index.js"];
   mockedSpawnSync.mockReset();
   readline.close.mockClear();
   readline.question.mockReset();
+  // Confirm prompts require an interactive stdin; simulate a TTY so the
+  // readline mock is exercised instead of the non-TTY fast path.
+  try {
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+  } catch {
+    (process.stdin as unknown as { isTTY: boolean }).isTTY = true;
+  }
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
@@ -155,8 +168,19 @@ afterEach(() => {
   delete process.env.UPSHARE_API_KEY;
   delete process.env.UPSHARE_API_URL;
   delete process.env.npm_config_user_agent;
+  delete process.env.npm_execpath;
+  delete process.env.npm_lifecycle_command;
+  delete process.env.VOLTA_HOME;
   process.argv = originalArgv;
   process.exitCode = undefined;
+  try {
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: undefined,
+    });
+  } catch {
+    // Ignore when stdin properties cannot be redefined.
+  }
   vi.restoreAllMocks();
 });
 
@@ -289,6 +313,22 @@ describe("infoCommand", () => {
     expect(output).toContain("64 B of 128 B (50%)");
   });
 
+  it("shows the partial view for a finalizing file", async () => {
+    vi.spyOn(ApiClient.prototype, "getFile").mockResolvedValue({
+      ...directPending,
+      file: { ...directPending.file, status: "finalizing" },
+    });
+    vi.spyOn(ApiClient.prototype, "getMultipartUpload").mockResolvedValue(
+      resume
+    );
+
+    await infoCommand("file-2", { apiUrl: "https://upshare.app" });
+
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(output).toContain("Partial upload");
+    expect(process.exitCode).not.toBe(1);
+  });
+
   it("fails when the file does not exist", async () => {
     vi.spyOn(ApiClient.prototype, "getFile").mockResolvedValue(null);
 
@@ -304,6 +344,17 @@ describe("infoCommand", () => {
 
     expect(getFile).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
+  });
+
+  it("forwards f_-prefixed file ids to getFile", async () => {
+    const fileId = `f_${"a".repeat(21)}`;
+    const getFile = vi
+      .spyOn(ApiClient.prototype, "getFile")
+      .mockResolvedValue(directActive);
+
+    await infoCommand(fileId, { apiUrl: "https://upshare.app" });
+
+    expect(getFile).toHaveBeenCalledWith(fileId);
   });
 });
 
@@ -331,7 +382,7 @@ describe("listCommand pagination", () => {
       .mockResolvedValueOnce(createPage(1, true))
       .mockResolvedValueOnce(createPage(2, false));
 
-    await listCommand({ all: true, apiUrl: "https://upshare.app", page: "1" });
+    await listCommand({ all: true, apiUrl: "https://upshare.app" });
 
     expect(listFiles).toHaveBeenNthCalledWith(1, {
       page: 1,
@@ -478,9 +529,10 @@ describe("deleteCommand", () => {
     await deleteCommand("file-123", { apiUrl: "https://upshare.app" });
 
     expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
-      "Delete cancelled."
+      "Cancelled."
     );
-    expect(process.exitCode).toBeFalsy();
+    // Ctrl+C is distinguishable from an explicit "no" (exit 0).
+    expect(process.exitCode).toBe(130);
   });
 });
 
@@ -494,9 +546,9 @@ describe("abortCommand", () => {
     await abortCommand(undefined, { apiUrl: "https://upshare.app" });
 
     expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
-      "Abort cancelled."
+      "Cancelled."
     );
-    expect(process.exitCode).toBeFalsy();
+    expect(process.exitCode).toBe(130);
   });
 });
 
@@ -549,6 +601,25 @@ describe("renameCommand", () => {
     });
 
     expect(process.exitCode).toBe(1);
+  });
+
+  it("forwards f_-prefixed file ids unchanged", async () => {
+    const fileId = `f_${"a".repeat(21)}`;
+    const renameFile = vi
+      .spyOn(ApiClient.prototype, "renameFile")
+      .mockResolvedValue({
+        expiresAt: "2026-09-07T00:00:00.000Z",
+        fileId,
+        fileName: "fixed.pdf",
+        success: true,
+      });
+
+    await renameCommand(fileId, "fixed.pdf", {
+      apiUrl: "https://upshare.app",
+    });
+
+    expect(renameFile).toHaveBeenCalledWith(fileId, "fixed.pdf");
+    expect(process.exitCode).not.toBe(1);
   });
 });
 
@@ -671,7 +742,7 @@ describe("upgradeCommand", () => {
   });
 
   it("upgrades to the beta tag with --beta", async () => {
-    mockRegistry({ version: "0.0.21-beta" });
+    mockRegistry({ version: "0.0.22-beta" });
     mockedSpawnSync.mockReturnValue({ status: 0 } as never);
 
     await expect(upgradeCommand({ beta: true })).resolves.toBe(true);
@@ -683,7 +754,7 @@ describe("upgradeCommand", () => {
       expect.objectContaining({ stdio: "inherit" })
     );
     expect(vi.mocked(console.log).mock.calls.flat().join("\n")).toContain(
-      "Upgraded to 0.0.21-beta"
+      "Upgraded to 0.0.22-beta"
     );
   });
 

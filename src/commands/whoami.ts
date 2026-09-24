@@ -6,8 +6,6 @@ import { formatBytes, sanitizeTerminalText } from "../lib/format";
 import { printFields, printHeading } from "../lib/output";
 import { createSpinner } from "../lib/spinner";
 
-const LEGACY_MONTHLY_QUOTA_BYTES = 53_687_091_200;
-
 export async function whoamiCommand(options?: {
   apiUrl?: string;
   profile?: string;
@@ -34,9 +32,7 @@ export async function whoamiCommand(options?: {
     );
 
     printHeading("UpShare Account");
-    const isLegacy =
-      data.quota.isLegacy ??
-      data.quota.maxQuotaBytes >= LEGACY_MONTHLY_QUOTA_BYTES;
+    const isLegacy = data.quota.isLegacy === true;
     const context = resolveCommandContext({
       apiUrl: options?.apiUrl,
       profile: options?.profile,
@@ -60,8 +56,10 @@ export async function whoamiCommand(options?: {
             : prefix;
         fields.push(["API key", pc.gray(label)]);
       }
-    } catch {
-      // Ignore failure to resolve stored API key label
+    } catch (error) {
+      console.debug(
+        `whoami: could not resolve stored API key label: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
     if (data.quota.reservedBytes > 0) {
       fields.push([

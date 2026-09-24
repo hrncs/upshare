@@ -7,24 +7,22 @@ function visibleLength(value: string): number {
   return stripVTControlCharacters(value).length;
 }
 
-function isStdoutColorEnabled(): boolean {
+function isColorEnabled(stream: NodeJS.WriteStream): boolean {
   if (!pc.isColorSupported) {
     return false;
   }
   if (process.env.FORCE_COLOR) {
     return true;
   }
-  return process.stdout?.isTTY === true;
+  return stream?.isTTY === true;
+}
+
+function isStdoutColorEnabled(): boolean {
+  return isColorEnabled(process.stdout);
 }
 
 function isStderrColorEnabled(): boolean {
-  if (!pc.isColorSupported) {
-    return false;
-  }
-  if (process.env.FORCE_COLOR) {
-    return true;
-  }
-  return process.stderr?.isTTY === true;
+  return isColorEnabled(process.stderr);
 }
 
 export function printError(message: string, hint?: string): void {
@@ -42,10 +40,17 @@ export function printError(message: string, hint?: string): void {
 }
 
 export function printFields(fields: OutputField[]): void {
-  const width = Math.max(...fields.map(([label]) => visibleLength(label)), 0);
+  let width = 0;
+  for (const [label] of fields) {
+    const len = visibleLength(label);
+    if (len > width) {
+      width = len;
+    }
+  }
   const useColor = isStdoutColorEnabled();
   for (const [label, value] of fields) {
-    const padded = label.padEnd(width);
+    const padded =
+      label + " ".repeat(Math.max(0, width - visibleLength(label)));
     console.log(`  ${useColor ? pc.dim(padded) : padded}  ${value}`);
   }
 }

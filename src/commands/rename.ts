@@ -1,8 +1,31 @@
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
-import { cleanIdentifier } from "../lib/format";
+import { cleanIdentifier, sanitizeTerminalText } from "../lib/format";
 import { printError, printFields } from "../lib/output";
 import { createSpinner } from "../lib/spinner";
+
+function validateFileName(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return "New file name is required.";
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return "New file name is required.";
+  }
+  if (trimmed.length > 255) {
+    return "New file name must be 1-255 characters.";
+  }
+  if (trimmed === "." || trimmed === "..") {
+    return "New file name must not be '.' or '..'.";
+  }
+  for (const character of trimmed) {
+    const code = character.charCodeAt(0);
+    if (character === "/" || character === "\\" || code < 32 || code === 127) {
+      return "New file name must not contain '/', '\\', or control characters.";
+    }
+  }
+  return null;
+}
 
 export async function renameCommand(
   target: string,
@@ -15,12 +38,13 @@ export async function renameCommand(
     process.exitCode = 1;
     return;
   }
-  const trimmedName = fileName.trim();
-  if (!trimmedName) {
-    printError("New file name is required.");
+  const nameError = validateFileName(fileName);
+  if (nameError) {
+    printError(nameError);
     process.exitCode = 1;
     return;
   }
+  const trimmedName = (fileName as string).trim();
 
   const client = new ApiClient({
     apiUrl: options?.apiUrl,
@@ -30,11 +54,11 @@ export async function renameCommand(
 
   try {
     const result = await client.renameFile(id, trimmedName);
-    spinner.succeed(`Renamed to ${result.fileName}`);
+    spinner.succeed(`Renamed to ${sanitizeTerminalText(result.fileName)}`);
     console.log();
     printFields([
-      ["File ID", pc.cyan(result.fileId)],
-      ["New name", pc.bold(result.fileName)],
+      ["File ID", pc.cyan(sanitizeTerminalText(result.fileId))],
+      ["New name", pc.bold(sanitizeTerminalText(result.fileName))],
     ]);
     console.log();
   } catch (error) {

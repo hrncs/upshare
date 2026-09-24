@@ -43,7 +43,7 @@ jobs:
 
       - name: Check code formatting
         if: matrix.os == 'ubuntu-latest'
-        run: pnpm biome format
+        run: pnpm exec biome format .
 
       - name: Run linter
         if: matrix.os == 'ubuntu-latest'

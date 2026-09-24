@@ -26,6 +26,8 @@ const eventSchema = z.discriminatedUnion("type", [
   }),
 ]);
 
+const MAX_JOURNAL_BYTES = 10 * 1024 * 1024;
+
 const stateSchema = metadataSchema.extend({
   completedChunks: z.array(z.number().int().nonnegative().safe()),
   etag: z.string().min(1).max(512).optional(),
@@ -142,12 +144,25 @@ export function createDownloadJournal(
     writeRecord(descriptor, parsed.data);
     return new DownloadJournal(journalPath, descriptor);
   } catch (error) {
-    fs.closeSync(descriptor);
+    try {
+      fs.closeSync(descriptor);
+    } catch {
+      // Intentionally ignored: descriptor cleanup is best-effort.
+    }
+    try {
+      fs.unlinkSync(journalPath);
+    } catch {
+      // Intentionally ignored: half-created file cleanup is best-effort.
+    }
     throw error;
   }
 }
 
 export function openDownloadJournal(journalPath: string): DownloadJournal {
+  const stat = fs.statSync(journalPath);
+  if (stat.size > MAX_JOURNAL_BYTES) {
+    throw invalidJournal(journalPath);
+  }
   const contents = fs.readFileSync(journalPath);
   const finalNewline = contents.lastIndexOf(0x0a);
   if (finalNewline < 0) {
@@ -159,7 +174,20 @@ export function openDownloadJournal(journalPath: string): DownloadJournal {
   return new DownloadJournal(journalPath, fs.openSync(journalPath, "a"));
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: journal replay with corruption tolerance
 export function loadDownloadState(journalPath: string): DownloadState | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(journalPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  if (stat.size > MAX_JOURNAL_BYTES) {
+    throw invalidJournal(journalPath);
+  }
   let serialized: string;
   try {
     serialized = fs.readFileSync(journalPath, "utf8");
@@ -170,8 +198,20 @@ export function loadDownloadState(journalPath: string): DownloadState | null {
     throw error;
   }
 
+  const terminated = serialized.endsWith("\n");
   const lines = serialized.split("\n");
-  lines.pop();
+  if (terminated) {
+    lines.pop();
+  } else if (lines.length > 0 && lines.at(-1) === "") {
+    lines.pop();
+  } else {
+    const tail = lines.at(-1) ?? "";
+    try {
+      JSON.parse(tail);
+    } catch {
+      lines.pop();
+    }
+  }
   if (lines.length === 0) {
     throw invalidJournal(journalPath);
   }

@@ -1,79 +1,84 @@
-import readline from "node:readline/promises";
 import pc from "picocolors";
-import { ApiClient } from "../lib/api-client";
-import { formatBytes } from "../lib/format";
+import { ApiClient, FILE_LIST_PAGE_SIZE } from "../lib/api-client";
+import { formatBytes, sanitizeTerminalText } from "../lib/format";
 import { printError, printHeading } from "../lib/output";
-import type { UserFileItem } from "../lib/schemas";
+import { confirmPrompt } from "../lib/prompt";
 import { createSpinner } from "../lib/spinner";
 
-const PENDING_PAGE_SIZE = 100;
+const MAX_PENDING_PAGES = 100;
+const ABORT_DELETE_CONCURRENCY = 5;
 
-function resolveAbortTargets(
-  pending: UserFileItem[],
+export function resolveAbortTargets(
+  pending: { id: string }[],
   target: string | undefined
-): UserFileItem[] | null {
+): { id: string } | { all: true } | { missing: string } {
   if (target === undefined) {
-    return pending;
+    return { all: true };
   }
   const match = pending.find((file) => file.id === target);
   if (!match) {
-    printError(
-      `No unfinished upload found for '${target}'.`,
-      "upshare abort to list unfinished uploads."
-    );
-    process.exitCode = 1;
-    return null;
+    return { missing: target };
   }
-  return [match];
-}
-
-async function confirmAbort(
-  count: number,
-  totalBytes: number
-): Promise<boolean> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  try {
-    const answer = await rl.question(
-      pc.yellow(
-        `Abort ${count.toLocaleString()} unfinished upload${count === 1 ? "" : "s"} (${formatBytes(totalBytes)})? (y/N): `
-      )
-    );
-    const normalized = answer.trim().toLowerCase();
-    return normalized === "y" || normalized === "yes";
-  } catch {
-    console.log();
-    return false;
-  } finally {
-    rl.close();
-  }
+  return { id: match.id };
 }
 
 async function fetchAllPending(client: ApiClient): Promise<{
-  files: UserFileItem[];
+  files: import("../lib/schemas").UserFileItem[];
   reservedBytes: number;
 }> {
-  const files: UserFileItem[] = [];
-  let page = 1;
-  let reservedBytes = 0;
-  for (;;) {
+  const files: import("../lib/schemas").UserFileItem[] = [];
+  let reservedBytes: number | undefined;
+  for (let page = 1; page <= MAX_PENDING_PAGES; page += 1) {
     // biome-ignore lint/performance/noAwaitInLoops: sequential
     const data = await client.listPendingUploads({
       page,
-      pageSize: PENDING_PAGE_SIZE,
+      pageSize: FILE_LIST_PAGE_SIZE,
     });
-    ({ reservedBytes } = data.quota);
+    reservedBytes ??= data.quota.reservedBytes;
     files.push(...data.files);
     if (!data.hasMore) {
       break;
     }
-    page += 1;
+    if (page === MAX_PENDING_PAGES) {
+      throw new Error(
+        `Too many unfinished uploads to list (over ${MAX_PENDING_PAGES * FILE_LIST_PAGE_SIZE}). Refine with a file ID.`
+      );
+    }
   }
-  return { files, reservedBytes };
+  return { files, reservedBytes: reservedBytes ?? 0 };
 }
 
+async function deleteWithConcurrency(
+  client: ApiClient,
+  ids: string[]
+): Promise<{ failures: { id: string; reason: string }[]; succeeded: number }> {
+  const failures: { id: string; reason: string }[] = [];
+  let succeeded = 0;
+  for (let index = 0; index < ids.length; index += ABORT_DELETE_CONCURRENCY) {
+    const batch = ids.slice(index, index + ABORT_DELETE_CONCURRENCY);
+    // biome-ignore lint/performance/noAwaitInLoops: bounded batches
+    const results = await Promise.allSettled(
+      batch.map((id) => client.deleteFile(id))
+    );
+    results.forEach((result, batchIndex) => {
+      const id = batch[batchIndex] ?? "";
+      if (result.status === "fulfilled") {
+        succeeded += 1;
+      } else {
+        failures.push({
+          id,
+          reason:
+            result.reason instanceof Error
+              ? result.reason.message
+              : "Unknown error",
+        });
+      }
+    });
+  }
+  return { failures, succeeded };
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: command handler with pagination, confirm, and batch reporting
 export async function abortCommand(
   target?: string,
   options?: {
@@ -88,10 +93,9 @@ export async function abortCommand(
   });
   const spinner = createSpinner("Fetching unfinished uploads...").start();
 
-  let pending: UserFileItem[];
+  let pending: import("../lib/schemas").UserFileItem[];
   try {
-    const result = await fetchAllPending(client);
-    pending = result.files;
+    ({ files: pending } = await fetchAllPending(client));
     spinner.stop();
   } catch (error) {
     spinner.fail(
@@ -112,17 +116,25 @@ export async function abortCommand(
     return;
   }
 
-  const targets = resolveAbortTargets(pending, target);
-  if (!targets) {
+  const resolution = resolveAbortTargets(pending, target);
+  if ("missing" in resolution) {
+    printError(
+      `No unfinished upload found for '${resolution.missing}'.`,
+      "upshare abort to list unfinished uploads."
+    );
+    process.exitCode = 1;
     return;
   }
-  pending = targets;
+  const targets =
+    "all" in resolution
+      ? pending
+      : pending.filter((file) => file.id === resolution.id);
 
-  const totalBytes = pending.reduce((total, file) => total + file.fileSize, 0);
-  printHeading(`Unfinished Uploads (${pending.length.toLocaleString()})`);
-  for (const file of pending) {
+  const totalBytes = targets.reduce((total, file) => total + file.fileSize, 0);
+  printHeading(`Unfinished Uploads (${targets.length})`);
+  for (const file of targets) {
     console.log(
-      `  ${pc.cyan(file.id)}  ${file.fileName}  ${formatBytes(file.fileSize)}`
+      `  ${pc.cyan(file.id)}  ${sanitizeTerminalText(file.fileName)}  ${formatBytes(file.fileSize)}`
     );
   }
   console.log();
@@ -132,37 +144,39 @@ export async function abortCommand(
   console.log();
 
   if (!options?.yes) {
-    const confirmed = await confirmAbort(pending.length, totalBytes);
+    const confirmed = await confirmPrompt(
+      `Abort ${targets.length} unfinished upload${targets.length === 1 ? "" : "s"} (${formatBytes(totalBytes)})? (y/N): `,
+      { yes: options?.yes }
+    );
     if (!confirmed) {
+      if (process.exitCode === 130) {
+        return;
+      }
       console.log(pc.dim("Abort cancelled."));
       return;
     }
   }
 
   const abortSpinner = createSpinner(
-    `Aborting ${pending.length.toLocaleString()} unfinished upload${pending.length === 1 ? "" : "s"}...`
+    `Aborting ${targets.length} unfinished upload${targets.length === 1 ? "" : "s"}...`
   ).start();
-  let aborted = 0;
-  let failed = 0;
-  for (const file of pending) {
-    try {
-      // biome-ignore lint/performance/noAwaitInLoops: sequential
-      await client.deleteFile(file.id);
-      aborted += 1;
-    } catch {
-      failed += 1;
-    }
-  }
+  const { failures, succeeded } = await deleteWithConcurrency(
+    client,
+    targets.map((file) => file.id)
+  );
 
-  if (failed === 0) {
+  if (failures.length === 0) {
     abortSpinner.succeed(
-      `Aborted ${aborted.toLocaleString()} upload${aborted === 1 ? "" : "s"}, freed ${formatBytes(totalBytes)}`
+      `Aborted ${succeeded} upload${succeeded === 1 ? "" : "s"}, freed ${formatBytes(totalBytes)}`
     );
     console.log();
   } else {
     abortSpinner.fail(
-      `Aborted ${aborted} of ${pending.length} uploads (${failed} failed)`
+      `Aborted ${succeeded} of ${targets.length} uploads (${failures.length} failed)`
     );
+    for (const failure of failures) {
+      printError(`Could not abort ${failure.id}: ${failure.reason}`);
+    }
     printError("Some unfinished uploads could not be aborted. Try again.");
     process.exitCode = 1;
   }

@@ -1,8 +1,9 @@
-import readline from "node:readline/promises";
 import pc from "picocolors";
 import { ApiClient } from "../lib/api-client";
-import { cleanIdentifier } from "../lib/format";
+import { sanitizeTerminalText } from "../lib/format";
+import { cleanIdentifier } from "../lib/identifiers";
 import { printError } from "../lib/output";
+import { confirmPrompt } from "../lib/prompt";
 import { createSpinner } from "../lib/spinner";
 
 export async function deleteCommand(
@@ -17,28 +18,16 @@ export async function deleteCommand(
   }
 
   if (!options?.yes) {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    try {
-      const answer = await rl.question(
-        pc.yellow(`Delete '${id}' permanently? (y/N): `)
-      );
-      if (
-        answer.trim().toLowerCase() !== "y" &&
-        answer.trim().toLowerCase() !== "yes"
-      ) {
-        console.log(pc.dim("Delete cancelled."));
+    const confirmed = await confirmPrompt(
+      `Delete '${sanitizeTerminalText(id)}' permanently? (y/N): `,
+      { yes: options?.yes }
+    );
+    if (!confirmed) {
+      if (process.exitCode === 130) {
         return;
       }
-    } catch {
-      console.log();
       console.log(pc.dim("Delete cancelled."));
       return;
-    } finally {
-      rl.close();
     }
   }
 
@@ -46,7 +35,9 @@ export async function deleteCommand(
     apiUrl: options?.apiUrl,
     profile: options?.profile,
   });
-  const spinner = createSpinner(`Deleting file '${id}'...`).start();
+  const spinner = createSpinner(
+    `Deleting file '${sanitizeTerminalText(id)}'...`
+  ).start();
 
   try {
     const result = await client.deleteFile(id);

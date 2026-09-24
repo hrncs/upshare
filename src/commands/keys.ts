@@ -15,25 +15,37 @@ function resolveKeyTarget(
     return null;
   }
   const lowered = trimmed.toLowerCase();
-  if (lowered === "current" || lowered === "this") {
+  // `current` refers to the API key used for this request.
+  if (lowered === "current") {
     return keys.find((key) => key.id === currentKeyId) ?? null;
   }
   const byId = keys.find((key) => key.id === trimmed);
   if (byId) {
     return byId;
   }
-  const byPrefix = keys.filter(
+  const prefixMatches = keys.filter(
     (key) =>
-      key.keyPrefix === trimmed || key.keyPrefix.endsWith(trimmed.slice(-4))
+      key.keyPrefix === trimmed ||
+      (trimmed.length >= 4 && key.keyPrefix.endsWith(trimmed))
   );
-  if (byPrefix.length === 1) {
-    return byPrefix[0];
+  if (prefixMatches.length === 1) {
+    return prefixMatches[0];
   }
-  if (byPrefix.length > 1) {
-    return null;
+  if (prefixMatches.length > 1) {
+    throw new Error(
+      `Ambiguous API key prefix: ${prefixMatches.length} matches. Use a full id or name. Run \`upshare keys\` to list keys.`
+    );
   }
   const byName = keys.filter((key) => key.name.toLowerCase() === lowered);
-  return byName.length === 1 ? byName[0] : null;
+  if (byName.length === 1) {
+    return byName[0];
+  }
+  if (byName.length > 1) {
+    throw new Error(
+      `Ambiguous API key name: ${byName.length} matches. Use a full id or prefix. Run \`upshare keys\` to list keys.`
+    );
+  }
+  return null;
 }
 
 export async function listKeysCommand(options?: {
@@ -87,7 +99,7 @@ export async function renameKeyCommand(
   options?: { apiUrl?: string; profile?: string }
 ): Promise<void> {
   const trimmedName = name.trim();
-  if (!(trimmedName.length >= 1 && trimmedName.length <= 64)) {
+  if (trimmedName.length === 0 || trimmedName.length > 64) {
     printError("New key name must be 1-64 characters.");
     process.exitCode = 1;
     return;
@@ -100,7 +112,16 @@ export async function renameKeyCommand(
       profile: options?.profile,
     });
     const data = await client.listApiKeys();
-    const match = resolveKeyTarget(data.apiKeys, target, data.currentKeyId);
+    let match: ApiKeyItem | null;
+    try {
+      match = resolveKeyTarget(data.apiKeys, target, data.currentKeyId);
+    } catch (error) {
+      spinner.fail(
+        error instanceof Error ? error.message : "Ambiguous API key."
+      );
+      process.exitCode = 1;
+      return;
+    }
     if (!match) {
       spinner.fail(
         "API key not found. Use an id, prefix, name, or `current`. Run `upshare keys` to list keys."

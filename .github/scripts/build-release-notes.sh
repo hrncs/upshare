@@ -14,7 +14,7 @@ release_title() {
   local msg highlight title
   msg=$(git log -1 --format=%s)
   highlight=$(printf '%s' "$msg" | sed -n 's/^release: v[^:]*: //p')
-  title="upshare v${VERSION}"
+  title="v${VERSION}"
   if [ -n "$highlight" ]; then
     title="${title}: ${highlight}"
   fi
@@ -41,7 +41,7 @@ fi
 GENERATED=$(gh api "repos/${GITHUB_REPOSITORY:?}/releases/generate-notes" \
   -f tag_name="v${VERSION}" -f target_commitish=main --jq .body)
 {
-  echo "## upshare v${VERSION}"
+  echo "## v${VERSION}"
   echo ""
   printf '%s\n\n' "$SECTION"
   printf '%s\n' "$GENERATED"

@@ -42,7 +42,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@napi-rs/keyring": "2.1.0",
+    "@napi-rs/keyring": "2.1.2",
     "commander": "^15.0.0",
     "picocolors": "^1.1.1",
     "picospinner": "^3.1.2",
@@ -54,7 +54,7 @@
     "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
     "ultracite": "7.12.0",
-    "vitest": "5.0.1"
+    "vitest": "5.0.5"
   },
   "packageManager": "pnpm@10.32.0",
   "engines": {

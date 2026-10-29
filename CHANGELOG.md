@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.23] - 2026-10-30
+
+### Changed
+- Dependency updates: `@napi-rs/keyring` 2.1.2, `zod` 4.6.7, `@types/node` 26.6.5, `tsdown` 0.23.2, `vitest` 5.0.5, and `@biomejs/biome` 2.5.15.
+
+### Fixed
+- Updated `zod` to 4.6.7 to address GHSA-mrhx-c7xc-m3w5 (memory exhaustion when validating oversized constrained collections).
+
 ## [0.0.22] - 2026-09-24
 
 ### Changed

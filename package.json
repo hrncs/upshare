@@ -1,6 +1,6 @@
 {
   "name": "upshare",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "description": "Official UpShare CLI: securely upload, download, share, and manage your files.",
   "keywords": [
     "upshare",

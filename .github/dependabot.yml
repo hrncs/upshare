@@ -13,6 +13,10 @@ updates:
       time: "06:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 10
+    ignore:
+      - dependency-name: "@biomejs/biome"
+        update-types:
+          - "version-update:semver-minor"
     labels:
       - "dependencies"
     commit-message:

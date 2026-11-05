@@ -255,6 +255,39 @@ describe("OAuth device authorization", () => {
   });
 });
 
+describe("CLI config", () => {
+  it("reads new-user signup availability", async () => {
+    const fetchMock = vi.fn(
+      (_url: string | URL | Request, _requestInit?: RequestInit) =>
+        Promise.resolve(
+          new Response(JSON.stringify({ allowNewUserSignups: false }), {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          })
+        )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+
+    await expect(client.getCliConfig()).resolves.toEqual({
+      allowNewUserSignups: false,
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://upshare.app/api/cli/config"
+    );
+  });
+
+  it("returns null when the server does not expose the endpoint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response("Not Found", { status: 404 })))
+    );
+    const client = new ApiClient({ apiUrl: "https://upshare.app" });
+
+    await expect(client.getCliConfig()).resolves.toBeNull();
+  });
+});
+
 describe("single file lookup", () => {
   it("fetches one file with its share link", async () => {
     process.env.UPSHARE_API_KEY = "ups_ci_secret";

@@ -158,6 +158,23 @@ function printAuthorizationInstructions(
   console.log();
 }
 
+async function ensureSignupsOpen(client: ApiClient): Promise<boolean> {
+  try {
+    const config = await client.getCliConfig();
+    if (config?.allowNewUserSignups ?? true) {
+      return true;
+    }
+  } catch {
+    return true;
+  }
+  printError(
+    "New sign-ups are temporarily closed.",
+    "Run `upshare login --web` if you already have an account."
+  );
+  process.exitCode = 1;
+  return false;
+}
+
 export async function signupCommand(options?: SignupOptions): Promise<void> {
   const mode = options?.mode ?? "signup";
   const backend = options?.backend ?? nativeCredentialBackend;
@@ -189,6 +206,10 @@ export async function signupCommand(options?: SignupOptions): Promise<void> {
   }
 
   const client = new ApiClient({ apiUrl, profile });
+  if (mode === "signup" && !(await ensureSignupsOpen(client))) {
+    return;
+  }
+
   let authorization: DeviceAuthorizationResponse;
   try {
     authorization = await client.requestDeviceAuthorization(

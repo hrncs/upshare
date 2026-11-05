@@ -88,6 +88,10 @@ export const healthResponseSchema = z.object({
     .optional(),
 });
 
+export const cliConfigResponseSchema = z.object({
+  allowNewUserSignups: z.boolean(),
+});
+
 const uploadPreparationBase = {
   expiresAt: dateString,
   fileId: z.string().min(1),
@@ -297,6 +301,7 @@ export type DeviceTokenErrorResponse = z.infer<
   typeof deviceTokenErrorResponseSchema
 >;
 export type DeviceTokenResponse = z.infer<typeof deviceTokenResponseSchema>;
+export type CliConfigResponse = z.infer<typeof cliConfigResponseSchema>;
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 export type UploadRequestResponse = z.infer<typeof uploadRequestResponseSchema>;
 export interface CompletedUploadPart {

@@ -4,6 +4,7 @@ import { resolveProfileApiKey } from "./credentials";
 import { sanitizeTerminalText } from "./format";
 import { cleanIdentifier, isFileId } from "./identifiers";
 import type {
+  CliConfigResponse,
   CompletedUploadPart,
   CompleteUploadResponse,
   DeleteFileResponse,
@@ -24,6 +25,7 @@ import type {
   WhoamiResponse,
 } from "./schemas";
 import {
+  cliConfigResponseSchema,
   completeUploadResponseSchema,
   deleteFileResponseSchema,
   deviceAuthorizationResponseSchema,
@@ -402,6 +404,21 @@ export class ApiClient {
       throw new Error(`Device authorization failed (${response.status}).`);
     }
     return { error: parsed.data, status: "error" };
+  }
+
+  async getCliConfig(): Promise<CliConfigResponse | null> {
+    const response = await this.fetch("/api/cli/config");
+    if (response.status === 404) {
+      await response.body?.cancel();
+      return null;
+    }
+    if (!response.ok) {
+      throw await responseError(
+        response,
+        `Could not read CLI configuration (${response.status})`
+      );
+    }
+    return parseResponse(response, cliConfigResponseSchema);
   }
 
   async checkHealth(): Promise<HealthResponse> {

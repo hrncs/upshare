@@ -72,7 +72,8 @@ upshare logout --all
 
 Browser login uses the OAuth 2.0 Device Authorization Grant. The verification
 code expires after ten minutes and can issue credentials only once. The API key
-remains valid until you revoke it.
+remains valid until you revoke it. If `upshare signup` reports that new sign-ups
+are temporarily closed, use `upshare login --web` with an existing account.
 
 For CI or headless environments, inject the key as `UPSHARE_API_KEY`. The
 environment variable takes precedence over the active profile's stored

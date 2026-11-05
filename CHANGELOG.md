@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.24] - 2026-11-05
+
+### Fixed
+- `upshare signup` now fails immediately when new user sign-ups are disabled, instead of waiting for the ten-minute device code to expire.
+
 ## [0.0.23] - 2026-10-30
 
 ### Changed

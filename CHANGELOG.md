@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.25] - 2026-11-22
+
+### Changed
+- Dependency updates: `commander` 15.1.0, `tsdown` 0.23.7, and `vitest` 5.1.0.
+
 ## [0.0.24] - 2026-11-05
 
 ### Fixed
